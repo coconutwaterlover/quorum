@@ -3,6 +3,18 @@
 **Index contracts for [dreamDEX event contracts](https://docs.dreamdex.io/developers/event-contracts).**
 Don't pick a market — pick how many of them have to be right.
 
+Two front doors, one engine:
+
+- **The UP vault** (`/`) — the simple one. Deposit paper collateral, get UP units, and watch one
+  balance hold the same number of contracts of every live market, rolling each payout into that
+  market's next window. Real asks in, real bids out, real oracle outcomes; the ledger lives in your
+  browser, so there is no account and no server-side state. It *looks* like a pooled vault but is
+  deliberately not one — each ledger owns its legs directly, so there is no shared NAV to manipulate
+  with a resting order and no other holder to dilute, which is the classic attack on pooled
+  prediction vaults.
+- **The numbers** (`/desk`) — the analytical one: books, correlations, the payoff ladder, the replay,
+  and the exact orders a basket buy becomes.
+
 A dreamDEX event contract is one Bernoulli draw. Fifteen minutes later it paid 1 or it paid 0, and
 that is the entire distribution. Quorum buys a **slice of every live window at once**: one unit costs
 the average of the leg prices and pays the fraction of legs that win.
@@ -69,12 +81,18 @@ creation/redemption basket, no NAV to publish, no premium or discount to arbitra
 It also constrains what the venue can honestly offer. The app prices four payoff shapes off the same
 mids and executes exactly one:
 
-| payoff | fair value | replicable by holding the legs |
-| --- | --- | --- |
-| Average of N | `Σ wᵢpᵢ` | **yes** — this is what Quorum buys |
-| Any 1 of N | `1 − Π(1−pᵢ)` | no |
-| At least K of N | Poisson-binomial tail | no |
-| All N (a parlay) | `Π pᵢ` | no |
+| payoff | fair at measured ρ | if independent | replicable by holding the legs |
+| --- | --- | --- | --- |
+| Average of N | `Σ wᵢpᵢ` | same — linear, so ρ can't move it | **yes** — this is what Quorum buys |
+| Any 1 of N | copula tail | `1 − Π(1−pᵢ)` | no |
+| At least K of N | copula tail | Poisson-binomial tail | no |
+| All N (a parlay) | copula tail | `Π pᵢ` | no |
+
+Thresholds are priced under a one-factor Gaussian copula at the measured mean correlation, with the
+independence number beside them — because independence is not a neutral default here. At ρ ≈ 0.6,
+four even-money legs all win ~23% of the time, not the 6.25% the product rule gives: the naive parlay
+price is off by nearly 4×, in the direction its own correlation panel already disproves. (The tests
+hold the copula to the one thing correlation can never do: move the mean.)
 
 The thresholds are shown because the comparison is the point: the same eight windows are a mild
 diversifier or a lottery ticket depending on nothing but which function of them settles. They would
@@ -203,7 +221,7 @@ says where the line is.
 books and depth, basket pricing, the correlation matrix and per-series autocorrelations over ~2,300
 settled windows, the replay, order construction, and reading outcome-token balances for a real
 account (tested against the market makers quoting these books — 2,010 contracts across two positions,
-which is what caught a bigint that could not be serialized). The engine has 74 unit tests, and the replay's realized sd reduction lands within 1.5 points of what the correlation
+which is what caught a bigint that could not be serialized). The engine has 92 unit tests, and the replay's realized sd reduction lands within 1.5 points of what the correlation
 model predicts analytically, which is a real check that the two halves agree.
 
 **Not verified end to end.** `placeOrder` and `redeemMany` have never been sent from this repo.
@@ -237,6 +255,13 @@ Reading it as the traded side's own price under-reports spend on every Down fill
 
 **`getBinaryOrderBook`'s `decimals` option defaults to 6.** It is what the NO side is inverted
 against, so leaving it out silently corrupts every NO price on an 18-decimal venue.
+
+**Equal cash per market is the seductive wrong vault.** "Split the deposit into equal parts" reads
+as the obvious policy and quietly builds a different product: a dollar buys 7× more contracts at 0.13
+than at 0.96, so an equal-cash vault is a leveraged bet on whichever market happens to be cheapest.
+The first cut of the UP vault shipped exactly this — the activity feed showed 95 contracts of one leg
+against 13 of another — and driving the UI in a browser is what caught it. The vault budgets each
+entry by `nav × askᵢ / Σ asks`, which is the allocation that makes every series hold the same count.
 
 **The slippage cushion has a fixed floor, and it distorts sizing.** `quoteBinaryStakeOverBook` pads
 its protective limit by the larger of 3% and ten ticks — so the pad is 3% on a leg priced at 0.955 and

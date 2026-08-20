@@ -92,12 +92,15 @@ async function main() {
   const widest = TEMPLATES[0].pick(upLegs);
   if (widest.length >= 2) {
     const weights = equalWeights(widest.length);
+    const matrix = correlationMatrix(history.outcomes, widest.map((l) => l.series), cadenceTolerance);
     const quote = quoteIndex(
       widest.map((leg, i) => ({ ...leg, weightBp: weights[i] })),
       { kind: "AVERAGE" },
+      { correlation: matrix },
     );
+    console.log(`  (thresholds priced at measured mean rho ${num(quote.assumedRho)})`);
     for (const shape of quote.shapes) {
-      console.log(`  ${shape.label.padEnd(18)} ${num(shape.fair)}  ${shape.replicable ? "replicable by holding the legs" : "needs a counterparty"}`);
+      console.log(`  ${shape.label.padEnd(18)} ${num(shape.fair)}  (independent: ${num(shape.fairIndependent)})  ${shape.replicable ? "replicable by holding the legs" : "needs a counterparty"}`);
     }
   }
   console.log();

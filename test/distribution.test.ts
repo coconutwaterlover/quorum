@@ -10,7 +10,7 @@ import {
   probabilityAbove,
   quantile,
 } from "../src/engine/distribution";
-import { equalWeights, riskParityWeights } from "../src/engine/quote";
+import { equalWeights, payoffShapes, riskParityWeights } from "../src/engine/quote";
 
 const close = (a: number, b: number, eps = 1e-9) =>
   assert.ok(Math.abs(a - b) < eps, `${a} !~= ${b}`);
@@ -137,4 +137,74 @@ test("risk parity equalizes each leg's risk contribution", () => {
   const weights = riskParityWeights(ps);
   const contributions = ps.map((p, i) => (weights[i] / BP) * legSd(p));
   for (const c of contributions) close(c, contributions[0], 1e-3);
+});
+
+// ---------------------------------------------------------------- correlation
+
+test("a null or zero correlation reproduces the independent distribution exactly", () => {
+  const legs = [
+    { p: 0.3, weightBp: 2500 },
+    { p: 0.6, weightBp: 2500 },
+    { p: 0.55, weightBp: 5000 },
+  ];
+  const plain = payoffDistribution(legs);
+  const zero = payoffDistribution(legs, 0);
+  for (let v = 0; v <= BP; v += 100) close(plain.pmf[v], zero.pmf[v], 1e-12);
+  const counts = countDistribution([0.3, 0.6, 0.55]);
+  const countsZero = countDistribution([0.3, 0.6, 0.55], 0);
+  for (let k = 0; k < counts.length; k++) close(counts[k], countsZero[k], 1e-12);
+});
+
+test("correlation moves the tails but can never move the mean", () => {
+  const legs = [
+    { p: 0.4, weightBp: 3000 },
+    { p: 0.55, weightBp: 3000 },
+    { p: 0.7, weightBp: 4000 },
+  ];
+  const independent = payoffDistribution(legs);
+  for (const rho of [0.2, 0.6, 0.9]) {
+    const dist = payoffDistribution(legs, rho);
+    close(dist.mean, independent.mean, 2e-3);
+    assert.ok(dist.sd > independent.sd, `rho ${rho} should widen the payoff, not shrink it`);
+  }
+});
+
+test("at measured correlation, all-N-win is worth several times the naive product", () => {
+  const ps = [0.5, 0.5, 0.5, 0.5];
+  const naive = atLeast(countDistribution(ps), 4);
+  close(naive, 0.0625, 1e-9);
+  const measured = atLeast(countDistribution(ps, 0.6), 4);
+  assert.ok(measured > 0.2 && measured < 0.3, `expected ~0.23, got ${measured}`);
+  // And the complement: "any 1 of 4" gets cheaper as the legs move together.
+  assert.ok(atLeast(countDistribution(ps, 0.6), 1) < atLeast(countDistribution(ps), 1));
+});
+
+test("thresholds grow monotonically with correlation, above the median leg count", () => {
+  const ps = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5];
+  let previous = atLeast(countDistribution(ps), 5);
+  for (const rho of [0.2, 0.4, 0.6, 0.8]) {
+    const current = atLeast(countDistribution(ps, rho), 5);
+    assert.ok(current > previous, `atLeast(5) should rise with rho, ${current} !> ${previous} at ${rho}`);
+    previous = current;
+  }
+});
+
+test("near-perfect correlation makes the basket all-or-nothing", () => {
+  const dist = payoffDistribution(
+    [
+      { p: 0.5, weightBp: 5000 },
+      { p: 0.5, weightBp: 5000 },
+    ],
+    0.97,
+  );
+  // Mass should sit almost entirely at 0 and 1; the middle rung nearly empties.
+  assert.ok(dist.pmf[0] + dist.pmf[BP] > 0.85, `extremes hold ${dist.pmf[0] + dist.pmf[BP]}`);
+});
+
+test("shapes price both columns, and only thresholds separate them", () => {
+  const shapes = payoffShapes([0.5, 0.5, 0.5, 0.5], { kind: "AVERAGE" }, 0.6);
+  const average = shapes.find((s) => s.shape.kind === "AVERAGE")!;
+  close(average.fair, average.fairIndependent, 1e-12);
+  const parlay = shapes.find((s) => s.shape.kind === "THRESHOLD" && s.shape.k === 4)!;
+  assert.ok(parlay.fair > 3 * parlay.fairIndependent, `${parlay.fair} vs ${parlay.fairIndependent}`);
 });

@@ -389,8 +389,10 @@ export default function Desk() {
                   <span><i className="swatch" style={{ background: "var(--down)" }} />below cost</span>
                 </div>
                 <p className="note">
-                  A single contract has two bars and nothing between them. This has {q.ladder.length}.
-                  P(pays nothing at all) {pct(q.pTotalLoss)} · P(every leg wins) {pct(q.pTotalWin)} ·
+                  A single contract has two bars and nothing between them. This has {q.ladder.length}
+                  {q.assumedRho !== null &&
+                    `, shaped at the measured correlation (ρ = ${q.assumedRho.toFixed(2)}) rather than at independence`}
+                  . P(pays nothing at all) {pct(q.pTotalLoss)} · P(every leg wins) {pct(q.pTotalWin)} ·
                   P(beats what it cost) {pct(q.pProfit)}.
                 </p>
               </div>
@@ -439,16 +441,24 @@ export default function Desk() {
             <h2>Same legs, four payoffs</h2>
             <p className="lede">
               The leg set is one thing; the function you settle against is another. All of these are priced
-              from the same mids — only the first is a linear function of the legs, and only a linear
-              function can be replicated by holding them.
+              from the same mids
+              {q.assumedRho !== null && (
+                <> — and at the correlation actually measured between them (ρ ={" "}
+                {q.assumedRho.toFixed(2)}), because legs that move together make every threshold worth
+                more than the independence arithmetic says. Both columns are shown so the gap is
+                visible; the average is the one shape correlation cannot touch</>
+              )}
+              . Only the first is a linear function of the legs, and only a linear function can be
+              replicated by holding them.
             </p>
             <div className="scroller">
               <table>
                 <thead>
                   <tr>
                     <th>payoff</th>
-                    <th>fair value</th>
-                    <th>vs the average</th>
+                    <th style={{ textTransform: "none" }}>fair, measured ρ</th>
+                    <th>if independent</th>
+                    <th>independence is off by</th>
                     <th>buildable by holding the legs</th>
                     <th style={{ textAlign: "left" }}>why</th>
                   </tr>
@@ -458,8 +468,11 @@ export default function Desk() {
                     <tr key={shape.label}>
                       <td className="series">{shape.label}</td>
                       <td className="num">{price(shape.fair)}</td>
-                      <td className="num dim">
-                        {shape.shape.kind === "AVERAGE" ? "—" : `${((shape.fair / q.fair - 1) * 100).toFixed(0)}%`}
+                      <td className="num dim">{price(shape.fairIndependent)}</td>
+                      <td className="num">
+                        {Math.abs(shape.fair - shape.fairIndependent) < 5e-4
+                          ? "—"
+                          : `${(shape.fair / Math.max(1e-6, shape.fairIndependent)).toFixed(1)}×`}
                       </td>
                       <td className={shape.replicable ? "up" : "dim"}>{shape.replicable ? "yes" : "no"}</td>
                       <td style={{ textAlign: "left", whiteSpace: "normal" }} className="muted">{shape.note}</td>
@@ -566,6 +579,13 @@ export default function Desk() {
                 <div className="n">single contract: {quote.backtest.singleLeg.wipeouts}</div>
               </div>
             </div>
+            <p className="note">
+              Model against history, same basket: the correlation model prices one roll&rsquo;s noise at{" "}
+              <b>{price(q.sdRealized)}</b>; the replay&rsquo;s realized figure over{" "}
+              {quote.backtest.rolls} rolls is <b>{price(quote.backtest.index.sd)}</b>. Different windows and
+              entry prices, so they should be close rather than equal — a wide gap here would mean one of
+              them is wrong.
+            </p>
             <div className="controls" style={{ marginTop: 16 }}>
               <label className="field">
                 replay entry price: {entryPrice.toFixed(2)}

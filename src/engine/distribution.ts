@@ -36,12 +36,27 @@ export interface DistLeg {
 }
 
 /**
- * Exact payoff distribution of a weighted basket, by convolution over the
- * basis-point grid. Legs are assumed independent; `correlation.ts` is where
- * dependence is handled, because dependence changes the moments without
- * changing this shape in any way we can measure from outcomes alone.
+ * Payoff distribution of a weighted basket.
+ *
+ * With `rho` omitted the legs are treated as independent and the distribution
+ * is an exact convolution over the basis-point grid. But independence is not a
+ * neutral default on this venue — settled history puts same-window dependence
+ * near 0.6 — and it is exactly the assumption that misprices the tails: at
+ * measured correlation, four even-money legs all win ~23% of the time, not the
+ * 6.25% the product rule gives. Passing the measured mean correlation prices
+ * the whole shape under a one-factor Gaussian copula instead: legs are
+ * independent conditional on a shared market factor, and the distribution is
+ * the mixture over that factor.
+ *
+ * Correlation moves the tails, never the mean — the mean is linear in the
+ * legs — and the tests hold the implementation to that.
  */
-export function payoffDistribution(legs: readonly DistLeg[]): PayoffDistribution {
+export function payoffDistribution(legs: readonly DistLeg[], rho: number | null = null): PayoffDistribution {
+  const pmf = mixture(rho, legs, convolve);
+  return { pmf, ...moments(pmf) };
+}
+
+function convolve(legs: readonly DistLeg[]): Float64Array {
   let pmf = new Float64Array(BP + 1);
   pmf[0] = 1;
   let top = 0; // highest reachable payoff so far, so we never scan dead tail
@@ -63,14 +78,24 @@ export function payoffDistribution(legs: readonly DistLeg[]): PayoffDistribution
     top = newTop;
   }
 
-  return { pmf, ...moments(pmf) };
+  return pmf;
 }
 
 /**
- * Poisson-binomial: P(exactly k of the legs win), for k = 0..n. This is the
- * distribution a threshold ("at least K of N") settles against.
+ * P(exactly k of the legs win), for k = 0..n — the distribution a threshold
+ * ("at least K of N") settles against. Independent legs (`rho` omitted) give
+ * the Poisson-binomial; a measured correlation gives its one-factor mixture,
+ * where "all N win" is worth several times the naive product.
  */
-export function countDistribution(probabilities: readonly number[]): Float64Array {
+export function countDistribution(probabilities: readonly number[], rho: number | null = null): Float64Array {
+  return mixture(
+    rho,
+    probabilities.map((p) => ({ p, weightBp: 0 })),
+    (legs) => poissonBinomial(legs.map((l) => l.p)),
+  );
+}
+
+function poissonBinomial(probabilities: readonly number[]): Float64Array {
   const n = probabilities.length;
   const dp = new Float64Array(n + 1);
   dp[0] = 1;
@@ -83,6 +108,75 @@ export function countDistribution(probabilities: readonly number[]): Float64Arra
     filled++;
   }
   return dp;
+}
+
+/**
+ * Mixture over the one-factor Gaussian copula: leg i wins when
+ * sqrt(rho)·Z + sqrt(1−rho)·e_i < Φ⁻¹(p_i), so conditional on the shared factor
+ * Z the legs are independent with p_i(z) = Φ((Φ⁻¹(p_i) − sqrt(rho)·z)/sqrt(1−rho)),
+ * and any distribution built from independent legs extends by integrating over Z.
+ *
+ * The factor cannot express negative *average* dependence, so rho at or below
+ * zero (and null) falls back to plain independence — for this venue that is the
+ * conservative direction, since measured dependence is firmly positive.
+ */
+function mixture(
+  rho: number | null,
+  legs: readonly DistLeg[],
+  build: (legs: readonly DistLeg[]) => Float64Array,
+): Float64Array {
+  if (rho === null || rho < 0.005) return build(legs);
+  const r = Math.min(0.999, rho);
+  const sqrtR = Math.sqrt(r);
+  const sqrtRest = Math.sqrt(1 - r);
+  const thresholds = legs.map((l) => normInv(clampProbability(l.p)));
+
+  // Trapezoid over z in [-6, 6]; weights renormalized so truncation cannot
+  // leak probability mass.
+  const STEP = 0.15;
+  let out: Float64Array | null = null;
+  let totalWeight = 0;
+  for (let z = -6; z <= 6 + 1e-9; z += STEP) {
+    const weight = normPdf(z) * STEP;
+    const conditional = legs.map((leg, i) => ({
+      weightBp: leg.weightBp,
+      p: clampProbability(normCdf((thresholds[i] - sqrtR * z) / sqrtRest)),
+    }));
+    const part = build(conditional);
+    if (!out) out = new Float64Array(part.length);
+    for (let v = 0; v < part.length; v++) out[v] += weight * part[v];
+    totalWeight += weight;
+  }
+  for (let v = 0; v < out!.length; v++) out![v] /= totalWeight;
+  return out!;
+}
+
+const SQRT_2PI = Math.sqrt(2 * Math.PI);
+
+function normPdf(x: number): number {
+  return Math.exp((-x * x) / 2) / SQRT_2PI;
+}
+
+/** Abramowitz–Stegun 26.2.17 — |error| < 7.5e-8, plenty for clamped inputs. */
+function normCdf(x: number): number {
+  const t = 1 / (1 + 0.2316419 * Math.abs(x));
+  const poly =
+    t *
+    (0.31938153 +
+      t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  const p = 1 - normPdf(Math.abs(x)) * poly;
+  return x >= 0 ? p : 1 - p;
+}
+
+function normInv(p: number): number {
+  let lo = -8;
+  let hi = 8;
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (normCdf(mid) < p) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
 }
 
 /** P(at least `k` of the legs win). */

@@ -33,8 +33,14 @@ import type { Shape, WeightedLeg } from "./types";
 export interface ShapePrice {
   readonly label: string;
   readonly shape: Shape;
-  /** Fair value from the leg mids. */
+  /** Fair value from the leg mids, at the measured correlation when one exists. */
   readonly fair: number;
+  /**
+   * The same shape priced as if the legs were independent. For thresholds the
+   * gap is the whole story — at measured correlation a 4-leg parlay is worth
+   * roughly four times the naive product — so both numbers are always shown.
+   */
+  readonly fairIndependent: number;
   /** Can a holder build this payoff by buying legs on this venue? */
   readonly replicable: boolean;
   readonly note: string;
@@ -83,6 +89,12 @@ export interface IndexQuote {
   readonly p95: number;
   /** fair - cost, per unit. Negative is the spread you conceded. */
   readonly edge: number | null;
+  /**
+   * The correlation the distribution and threshold prices were computed at —
+   * the measured mean off-diagonal, or null when history could not supply one
+   * (in which case everything falls back to independence and says so).
+   */
+  readonly assumedRho: number | null;
 
   readonly shapes: readonly ShapePrice[];
   readonly rollProjection: RollProjection | null;
@@ -106,6 +118,12 @@ export function quoteIndex(
   const weights = legs.map((l) => l.weightBp / BP);
   const mids = legs.map((l) => clampProbability(l.mid ?? 0.5));
 
+  // The mean is immune to correlation, but the tails are not: every
+  // distribution-derived number below is priced at the measured mean
+  // dependence, so the shapes panel can no longer contradict the correlation
+  // panel two sections above it.
+  const assumedRho = options.correlation?.meanOffDiagonal ?? null;
+
   const fair = dot(weights, mids);
   const asks = legs.map((l) => l.ask);
   const bids = legs.map((l) => l.bid);
@@ -117,6 +135,7 @@ export function quoteIndex(
 
   const distribution = payoffDistribution(
     legs.map((l, i) => ({ p: mids[i], weightBp: l.weightBp })),
+    assumedRho,
   );
 
   const sdIndependent = basketSd(weights, mids, null, 0);
@@ -168,7 +187,8 @@ export function quoteIndex(
     median: quantile(distribution, 0.5),
     p95: quantile(distribution, 0.95),
     edge: cost === null ? null : fair - cost,
-    shapes: payoffShapes(mids, shape),
+    assumedRho,
+    shapes: payoffShapes(mids, shape, assumedRho),
     rollProjection,
   };
 }
@@ -183,14 +203,23 @@ export function quoteIndex(
  * same eight windows are a mild diversifier or a lottery ticket depending only
  * on which function of them you settle against.
  */
-export function payoffShapes(mids: readonly number[], selected: Shape): readonly ShapePrice[] {
+export function payoffShapes(
+  mids: readonly number[],
+  selected: Shape,
+  rho: number | null = null,
+): readonly ShapePrice[] {
   const n = mids.length;
-  const counts = countDistribution(mids);
+  const counts = countDistribution(mids, rho);
+  const independent = rho === null ? counts : countDistribution(mids);
+  const average = mids.reduce((a, b) => a + b, 0) / Math.max(1, n);
   const out: ShapePrice[] = [
     {
       label: `Average of ${n}`,
       shape: { kind: "AVERAGE" },
-      fair: mids.reduce((a, b) => a + b, 0) / Math.max(1, n),
+      // Linear in the legs, so correlation cannot move it — the two columns
+      // agreeing here is the point, not an omission.
+      fair: average,
+      fairIndependent: average,
       replicable: true,
       note: "Pays the fraction of legs that win. Replicated exactly by holding the legs.",
     },
@@ -202,6 +231,7 @@ export function payoffShapes(mids: readonly number[], selected: Shape): readonly
       label,
       shape: { kind: "THRESHOLD", k },
       fair: atLeast(counts, k),
+      fairIndependent: atLeast(independent, k),
       replicable: false,
       note:
         k === n
