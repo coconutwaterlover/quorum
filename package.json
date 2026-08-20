@@ -1,0 +1,29 @@
+{
+  "name": "quorum",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Index contracts for dreamDEX event contracts",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test": "tsx --test test/*.test.ts",
+    "bot": "tsx bots/roll-sleeve.ts",
+    "census": "tsx bots/census.ts"
+  },
+  "dependencies": {
+    "@somnia-chain/markets-sdk": "^0.27.0",
+    "next": "^15.5.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "viem": "^2.55.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.17.2",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.2"
+  }
+}
