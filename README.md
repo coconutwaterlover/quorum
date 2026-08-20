@@ -203,8 +203,7 @@ says where the line is.
 books and depth, basket pricing, the correlation matrix and per-series autocorrelations over ~2,300
 settled windows, the replay, order construction, and reading outcome-token balances for a real
 account (tested against the market makers quoting these books — 2,010 contracts across two positions,
-which is what caught a bigint that could not be serialized). The engine has 66 unit tests over pure
-functions, and the replay's realized sd reduction lands within 1.5 points of what the correlation
+which is what caught a bigint that could not be serialized). The engine has 74 unit tests, and the replay's realized sd reduction lands within 1.5 points of what the correlation
 model predicts analytically, which is a real check that the two halves agree.
 
 **Not verified end to end.** `placeOrder` and `redeemMany` have never been sent from this repo.
@@ -238,6 +237,14 @@ Reading it as the traded side's own price under-reports spend on every Down fill
 
 **`getBinaryOrderBook`'s `decimals` option defaults to 6.** It is what the NO side is inverted
 against, so leaving it out silently corrupts every NO price on an 18-decimal venue.
+
+**The slippage cushion has a fixed floor, and it distorts sizing.** `quoteBinaryStakeOverBook` pads
+its protective limit by the larger of 3% and ten ticks — so the pad is 3% on a leg priced at 0.955 and
+**50%** on one priced at 0.020. Escrow is quantity x that padded limit, so budgeting each leg on its
+*ask* under-buys exactly the cheap legs, by up to a third, and the contract counts come out unequal
+even though the allocation formula is right. Production showed `[5.941, 8.649, 8.262, 5.941]` where all
+four should have matched. The ask now only seeds a first pass; the second budgets on what the first was
+actually charged.
 
 **Escrow is not a price forecast.** `quoteBinaryStakeOverBook` returns `escrow = quantity × the
 protective limit` — a max loss. The expected fill comes from `quoteBinaryOrderOverBook`, which walks

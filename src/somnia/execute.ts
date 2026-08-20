@@ -106,11 +106,55 @@ export function planBasket(
   // leg priced at 0.13 than one priced at 0.98, so equal stakes produce a
   // payoff dominated by whichever legs happened to be cheap.
   //
-  // Budgeting each leg in proportion to `weight x price` instead makes the
-  // contract counts proportional to the weights, which is the definition.
-  const notional = legs.map((leg) => (leg.weightBp / BP) * (leg.ask ?? leg.mid ?? 0.5));
-  const notionalTotal = notional.reduce((a, b) => a + b, 0);
+  // Budgeting in proportion to `weight x price` fixes that, but only if `price`
+  // is the price actually charged. A buy escrows quantity x its *protective
+  // limit*, and that limit carries a slippage cushion with a fixed ten-tick
+  // floor — 3% of a leg priced at 0.955, but 50% of one priced at 0.020. So
+  // budgeting on the ask under-buys exactly the cheap legs, by up to a third,
+  // and the contract counts come out unequal all over again.
+  //
+  // The ask therefore only seeds a first pass; the second budgets on what that
+  // pass was actually charged. The cushion barely moves with size, so one
+  // correction lands the counts on the weights.
+  const seed = legs.map((leg) => leg.ask ?? leg.mid ?? 0.5);
+  const firstPass = allocate(legs, books, stake, seed);
+  const charged = firstPass.map((attempt, i) =>
+    attempt.contracts > 0 ? attempt.escrow / attempt.contracts : seed[i],
+  );
+  const plans = allocate(legs, books, stake, charged);
 
+  const fillable = plans.filter((p) => p.unfillable === null);
+  // A unit needs `weight` contracts of *every* leg, so a leg nobody is offering
+  // makes the unit unbuyable rather than cheaper. Taking the minimum over only
+  // the fillable legs would quote a basket that is quietly missing one.
+  const unitsPlanned =
+    legs.length === 0 || fillable.length < legs.length
+      ? 0
+      : Math.min(...plans.map((p) => p.contracts / (p.weightBp / BP)));
+  const totalEscrow = plans.reduce((sum, p) => sum + p.escrow, 0);
+  const expectedCost = plans.reduce((sum, p) => sum + (p.expectedPrice ?? 0) * p.contracts, 0);
+
+  return {
+    stake,
+    legs: plans,
+    unitsPlanned,
+    totalEscrow,
+    expectedCost,
+    unfillableLegs: plans.length - fillable.length,
+    costPerUnit: unitsPlanned > 0 ? expectedCost / unitsPlanned : null,
+    worstCostPerUnit: unitsPlanned > 0 ? totalEscrow / unitsPlanned : null,
+  };
+}
+
+/** One sizing pass: split `stake` by `weight x price`, then quote each leg. */
+function allocate(
+  legs: readonly WeightedLeg[],
+  books: ReadonlyMap<string, LegBook>,
+  stake: number,
+  prices: readonly number[],
+): LegPlan[] {
+  const notional = legs.map((leg, i) => (leg.weightBp / BP) * prices[i]);
+  const notionalTotal = notional.reduce((a, b) => a + b, 0);
   const plans: LegPlan[] = [];
 
   for (const [index, leg] of legs.entries()) {
@@ -176,26 +220,7 @@ export function planBasket(
     });
   }
 
-  const fillable = plans.filter((p) => p.unfillable === null);
-  // One index unit needs weightBp/BP contracts of every leg, so the unit count
-  // the basket really achieves is set by its worst-supplied leg.
-  const unitsPlanned =
-    fillable.length === 0
-      ? 0
-      : Math.min(...fillable.map((p) => p.contracts / (p.weightBp / BP)));
-  const totalEscrow = plans.reduce((sum, p) => sum + p.escrow, 0);
-  const expectedCost = plans.reduce((sum, p) => sum + (p.expectedPrice ?? 0) * p.contracts, 0);
-
-  return {
-    stake,
-    legs: plans,
-    unitsPlanned,
-    totalEscrow,
-    expectedCost,
-    unfillableLegs: plans.length - fillable.length,
-    costPerUnit: unitsPlanned > 0 ? expectedCost / unitsPlanned : null,
-    worstCostPerUnit: unitsPlanned > 0 ? totalEscrow / unitsPlanned : null,
-  };
+  return plans;
 }
 
 /** Execute a plan. Throws only when trading is switched off; leg errors are reported. */
