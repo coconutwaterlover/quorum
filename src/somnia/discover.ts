@@ -75,35 +75,43 @@ export async function discover(options: DiscoverOptions = {}): Promise<Discovery
     return true;
   });
 
+  // One round trip per market, not one after another. Serially this is the
+  // whole cost of a cold request — 3.8s for eight markets against 0.5s
+  // concurrently — and on a serverless deploy every request is a cold one.
+  const probed = await Promise.all(
+    fresh.map(async (row) => {
+      const marketId = row.marketId as `0x${string}`;
+      const onchain = await exchange.client.getMarketOnchain(marketId);
+      if (onchain.status !== 1) return { row, skip: "on-chain status is not Trading" as const };
+      if (Number(onchain.expiry) - now < minSecondsLeft) {
+        return { row, skip: "on-chain expiry left no headroom" as const };
+      }
+      const pool = onchain.pool as `0x${string}`;
+      const decimals = Number(onchain.decimals);
+      // `decimals` is not optional in practice: the NO side is derived as
+      // 1 - yesPrice, and the default of 6 would invert an 18-decimal book
+      // against the wrong "one".
+      const [book, params] = await Promise.all([
+        exchange.client.getBinaryOrderBook(pool, { depth, decimals }),
+        exchange.client.getBinaryBookParams(pool),
+      ]);
+      return { row, onchain, pool, decimals, book, params, skip: null };
+    }),
+  );
+
   const legs: Leg[] = [];
   const books = new Map<string, LegBook>();
 
-  // Small enough to do serially and stay readable; a wide venue would batch.
-  for (const row of fresh) {
+  for (const probe of probed) {
+    if (probe.skip !== null) {
+      bump(probe.skip);
+      continue;
+    }
+    const { row, onchain, pool, decimals, book, params } = probe;
     const marketId = row.marketId as `0x${string}`;
-    const onchain = await exchange.client.getMarketOnchain(marketId);
-    if (onchain.status !== 1) {
-      bump("on-chain status is not Trading");
-      continue;
-    }
-    if (Number(onchain.expiry) - now < minSecondsLeft) {
-      bump("on-chain expiry left no headroom");
-      continue;
-    }
-
-    const pool = onchain.pool as `0x${string}`;
-    const decimals = Number(onchain.decimals);
     const one = 10 ** decimals;
-    // `decimals` is not optional in practice: the NO side is derived as
-    // 1 - yesPrice, and the default of 6 would invert an 18-decimal book
-    // against the wrong "one".
-    const [book, params] = await Promise.all([
-      exchange.client.getBinaryOrderBook(pool, { depth, decimals }),
-      exchange.client.getBinaryBookParams(pool),
-    ]);
     const tops = bookTops(book);
     const series = `${row.asset}|${row.interval}`;
-    const symbols = await outcomeSymbols(marketId);
 
     const shared = {
       marketId,
@@ -131,8 +139,6 @@ export async function discover(options: DiscoverOptions = {}): Promise<Discovery
       legs.push({
         ...shared,
         side,
-        symbol: `${symbols.base}#${isUp ? "YES" : "NO"}`,
-        yesSymbol: `${symbols.base}#YES`,
         bid,
         ask,
         mid: midOf(bid, ask),
@@ -161,25 +167,6 @@ export async function discover(options: DiscoverOptions = {}): Promise<Discovery
     books,
     skipped: [...skipped.entries()].map(([reason, count]) => ({ reason, count })),
   };
-}
-
-/**
- * Symbols come from the unified market list. It is a heavier call than the
- * binary rows, so it is loaded once and cached per process — symbols are only
- * used for display and for the SDK's own by-symbol verbs.
- */
-let symbolCache: Map<string, string> | null = null;
-
-async function outcomeSymbols(marketId: string): Promise<{ base: string }> {
-  if (!symbolCache) {
-    symbolCache = new Map();
-    const markets = await readExchange().loadMarkets(true);
-    for (const market of Object.values(markets)) {
-      const id = (market.info as { marketId?: string }).marketId;
-      if (id) symbolCache.set(id.toLowerCase(), market.symbol);
-    }
-  }
-  return { base: symbolCache.get(marketId.toLowerCase()) ?? marketId };
 }
 
 /**

@@ -175,6 +175,25 @@ quietly become independence.
 
 ---
 
+## Deploying
+
+Zero config on Vercel — import the repo and it builds. Two things worth knowing before you do:
+
+**Leave it read-only unless you mean it.** With no environment variables the deployment discovers
+markets, prices baskets, measures correlations, replays history and shows the exact orders it would
+send. Setting `QUORUM_ALLOW_TRADING=1` and `QUORUM_PRIVATE_KEY` on a *public* URL means that key is
+spending for anyone who opens the page — `QUORUM_MAX_STAKE` is the only thing between them and the
+balance. A public demo wants read-only; a funded key belongs in `bots/roll-sleeve.ts` on your own
+machine.
+
+**Every request is a cold one.** The snapshot cache lives inside one serverless instance, so a fresh
+instance pays the full discovery cost: about a second of concurrent chain reads. That is why the
+per-market reads fan out rather than run in sequence — serially the same work takes 3.8s for eight
+markets, and it used to also wait 1.8s on `loadMarkets()` for symbols that were never displayed.
+Routes set `maxDuration = 60` so a slow RPC round trip degrades into a slow page instead of a 504.
+
+---
+
 ## What is verified, and what isn't
 
 Worth being precise about, because a demo that implies more than it proved is worse than one that

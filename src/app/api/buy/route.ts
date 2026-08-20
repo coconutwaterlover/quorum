@@ -4,6 +4,7 @@ import { currentBooks, quoteSelection, type QuoteRequest } from "@/somnia/desk";
 import { tradingMode } from "@/somnia/exchange";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   const mode = tradingMode();

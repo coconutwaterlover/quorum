@@ -18,8 +18,6 @@ function leg(overrides: Partial<Leg> & { bid: number | null; ask: number | null 
     asset: "BTC",
     interval: "15m",
     side: "UP",
-    symbol: "BTC#YES",
-    yesSymbol: "BTC#YES",
     poolAddress: "0xpool",
     marketAddress: "0xmarket",
     expiry: 1_000_000,

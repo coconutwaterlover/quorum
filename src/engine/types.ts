@@ -11,10 +11,6 @@ export interface Leg {
   readonly asset: string;
   readonly interval: string;
   readonly side: Side;
-  /** Outcome symbol for the chosen side, as the SDK names it. */
-  readonly symbol: string;
-  /** The market's own YES symbol, which is the book we actually read. */
-  readonly yesSymbol: string;
   readonly poolAddress: string;
   readonly marketAddress: string;
   readonly expiry: number;

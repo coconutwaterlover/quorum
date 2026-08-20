@@ -4,6 +4,7 @@ import { deskAccount, loadPortfolio, sweepRedeem, toWire } from "@/somnia/portfo
 import { tradingMode } from "@/somnia/exchange";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 export async function GET(request: Request) {
   const asked = new URL(request.url).searchParams.get("account");

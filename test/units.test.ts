@@ -43,8 +43,6 @@ function stub(asset: string, interval: string, ask: number | null, bid: number |
     asset,
     interval,
     side: "UP",
-    symbol: "s",
-    yesSymbol: "s",
     poolAddress: "0x",
     marketAddress: "0x",
     expiry: 1_000_000 + intervalSeconds(interval),
