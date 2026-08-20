@@ -107,6 +107,20 @@ function executorExchange(key: Hex): SomniaMarkets {
   });
 }
 
+/** One market in the bucket a vault is (or is about to be) betting on. */
+export interface BucketMarket {
+  readonly marketId: string;
+  readonly series: string;
+  readonly asset: string;
+  readonly interval: string;
+  /** Price of THIS vault's side right now — what the next contract costs. */
+  readonly price: number | null;
+  readonly expiry: number;
+  readonly question: string;
+  /** Contracts the vault currently holds in this market's window. */
+  readonly held: number | null;
+}
+
 export interface VaultState {
   readonly symbol: "QUP" | "QDWN";
   readonly side: Side;
@@ -122,6 +136,8 @@ export interface VaultState {
   readonly pendingDeposits: number;
   readonly pendingWithdraws: number;
   readonly pendingDepositAssets: number;
+  /** The live markets this vault's pot is spread across. */
+  readonly bucket: readonly BucketMarket[];
   /** What the executor currently holds for this vault. */
   readonly executor: {
     readonly address: Address;
@@ -132,7 +148,10 @@ export interface VaultState {
   } | null;
 }
 
-export async function readVaultState(config: VaultConfig): Promise<VaultState | null> {
+export async function readVaultState(
+  config: VaultConfig,
+  legs?: readonly import("@/engine/types").Leg[],
+): Promise<VaultState | null> {
   if (!config.address) return null;
   const client = vaultPublicClient();
   const vault = { address: config.address, abi: quorumVaultAbi } as const;
@@ -173,6 +192,25 @@ export async function readVaultState(config: VaultConfig): Promise<VaultState | 
     };
   }
 
+  // The bucket: the 15m cross-section this vault trades, seen from its own
+  // side, with the contracts it holds in each window right now.
+  const heldBySeries = new Map(
+    (executor?.livePositions ?? []).map((p) => [p.series, p.contracts]),
+  );
+  const bucket: BucketMarket[] = (legs ?? [])
+    .filter((l) => l.side === config.side && l.interval === "15m")
+    .sort((a, b) => a.series.localeCompare(b.series))
+    .map((l) => ({
+      marketId: l.marketId,
+      series: l.series,
+      asset: l.asset,
+      interval: l.interval,
+      price: l.ask ?? l.mid,
+      expiry: l.expiry,
+      question: l.question,
+      held: heldBySeries.get(l.series) ?? null,
+    }));
+
   return {
     symbol: config.symbol,
     side: config.side,
@@ -186,6 +224,7 @@ export async function readVaultState(config: VaultConfig): Promise<VaultState | 
     pendingDeposits: Number(queues[0]),
     pendingWithdraws: Number(queues[1]),
     pendingDepositAssets: Number(formatUnits(pendingAssets, 6)),
+    bucket,
     executor,
   };
 }
@@ -198,6 +237,15 @@ export interface KeeperAction {
 
 const MIN_DEPLOY = 1; // don't bother trading pots under 1 tUSDC
 const MIN_HEADROOM_SECONDS = 180;
+/**
+ * Fraction of the pot staked per epoch. All-in staking is a martingale to
+ * zero: the bucket protects across markets *within* a window, but BTC and ETH
+ * close the same way ~60% of the time, so "every market lost" hits every few
+ * epochs and multiplies an all-in pot by ~0 — which is exactly what flattened
+ * QUP from 4.57 to 0.10 in its first hour live. A third per epoch keeps the
+ * upside compounding while a lost epoch costs a third, not everything.
+ */
+const STAKE_FRACTION = Number(process.env.QUORUM_STAKE_FRACTION ?? 0.33);
 
 /** One keeper pass over both vaults. Every step is reported, including skips. */
 export async function keeperTick(): Promise<KeeperAction[]> {
@@ -284,7 +332,9 @@ export async function keeperTick(): Promise<KeeperAction[]> {
         }
         const weights = equalWeights(legs.length);
         const weighted: WeightedLeg[] = legs.map((leg, i) => ({ ...leg, weightBp: weights[i] }));
-        const plan = planBasket(weighted, discovery.books, state.cash);
+        // The contract hands the whole pot to the executor; only this fraction
+        // is put at risk. The rest sits idle and returns at settle.
+        const plan = planBasket(weighted, discovery.books, state.cash * STAKE_FRACTION);
         const receipt2 = await buyBasket(plan, discovery.books, { exchange });
         actions.push({
           vault: symbol,

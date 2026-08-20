@@ -32,7 +32,11 @@ it can recover.
 
 The honest trust boundary: the **executor key custodies the pot while deployed** and is trusted to
 return it. Under-returning would be visible on-chain forever as a price drop — visible, not
-prevented. Testnet demonstration, not a custody design. The epoch loop (`redeem → return → settle → deploy → buy`)
+prevented. Testnet demonstration, not a custody design. Each epoch stakes a third of the pot, not all of it (`QUORUM_STAKE_FRACTION`): the bucket
+diversifies across markets within a window, but BTC and ETH agree ~60% of the time, so an all-in pot
+multiplies by ~0 every time the whole bucket loses — QUP's first hour live went 1.00 → 2.44 → 4.57 →
+0.10 proving exactly that. Fractional staking is the difference between a track record and a
+martingale. The epoch loop (`redeem → return → settle → deploy → buy`)
 rides on the page's own polling: each `/api/vaults` response schedules one debounced keeper pass
 post-response, so any open tab keeps the vaults rolling (per-minute crons are a paid Vercel feature;
 a daily cron on `/api/keeper` is the dead-man fallback, and hitting it with the `CRON_SECRET` works

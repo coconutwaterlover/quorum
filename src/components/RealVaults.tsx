@@ -51,6 +51,16 @@ interface VaultsApi {
   up: VaultStateApi | { error: string } | null;
   down: VaultStateApi | { error: string } | null;
 }
+interface BucketMarket {
+  marketId: string;
+  series: string;
+  asset: string;
+  interval: string;
+  price: number | null;
+  expiry: number;
+  question: string;
+  held: number | null;
+}
 interface VaultStateApi {
   symbol: "QUP" | "QDWN";
   side: "UP" | "DOWN";
@@ -63,6 +73,7 @@ interface VaultStateApi {
   lastSettlePrice: number | null;
   pendingDeposits: number;
   pendingWithdraws: number;
+  bucket: BucketMarket[];
   executor: {
     liveContracts: number;
     livePositions: { series: string; contracts: number; expiry: number }[];
@@ -82,6 +93,12 @@ export default function RealVaults() {
   const [history, setHistory] = useState<HistoryApi | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(false);
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(tick);
+  }, []);
 
   useEffect(() => {
     // First visit gets the explainer; after that it hides behind the “what is
@@ -180,8 +197,8 @@ export default function RealVaults() {
       )}
 
       <div className="grid-2">
-        {up && <VaultCard state={up} wallet={wallet} />}
-        {down && <VaultCard state={down} wallet={wallet} />}
+        {up && <VaultCard state={up} wallet={wallet} now={now} />}
+        {down && <VaultCard state={down} wallet={wallet} now={now} />}
       </div>
 
       {(up || down) && (
@@ -212,7 +229,7 @@ export default function RealVaults() {
   );
 }
 
-function VaultCard({ state, wallet }: { state: VaultStateApi; wallet?: Address }) {
+function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Address; now: number }) {
   const [amount, setAmount] = useState(25);
   const [note, setNote] = useState<string | null>(null);
   const isUp = state.side === "UP";
@@ -266,9 +283,11 @@ function VaultCard({ state, wallet }: { state: VaultStateApi; wallet?: Address }
         {state.symbol} — everything {isUp ? "up" : "down"}
       </h2>
       <p className="lede">
-        One token that bets every live market closes {isUp ? "above" : "below"} its opening price,
-        window after window.
+        Not one bet — a <strong>bucket</strong>. One {state.symbol} is the same-size position in{" "}
+        <em>every</em> market below at once, re-bought every window.
       </p>
+
+      <Bucket state={state} now={now} />
 
       <div className="stats">
         <div className="stat hero">
@@ -295,15 +314,6 @@ function VaultCard({ state, wallet }: { state: VaultStateApi; wallet?: Address }
           </div>
         </div>
       </div>
-
-      {state.executor && state.executor.livePositions.length > 0 && (
-        <p className="note">
-          Holding now:{" "}
-          {state.executor.livePositions
-            .map((p) => `${p.contracts.toFixed(1)} × ${p.series.replace("|", " ")}`)
-            .join(" · ")}
-        </p>
-      )}
 
       {wallet ? (
         <div className="controls" style={{ marginTop: 16 }}>
@@ -364,6 +374,18 @@ function VaultCard({ state, wallet }: { state: VaultStateApi; wallet?: Address }
         <p className="note" style={{ marginTop: 16 }}>Connect a wallet above to deposit.</p>
       )}
 
+      {wallet && amount > 0 && state.bucket.some((m) => m.price) && (
+        <p className="note">
+          {amount} tUSDC buys ≈{" "}
+          <b>
+            {(
+              amount / state.bucket.reduce((sum, m) => sum + (m.price ?? 0), 0)
+            ).toFixed(1)}{" "}
+            contracts of each market in the bucket
+          </b>{" "}
+          — the same stance on all of them, not a pick.
+        </p>
+      )}
       {wallet && (
         <p className="note">
           You hold <b>{myShares === null ? "—" : myShares.toFixed(2)} {state.symbol}</b>
@@ -593,5 +615,57 @@ function IntroModal({ onClose }: { onClose: () => void }) {
         </button>
       </div>
     </div>
+  );
+}
+
+/**
+ * The bucket, front and center: every market this pot is spread across, this
+ * vault's side of its price, the countdown, and — while deployed — the
+ * contracts actually held. This is the part a holder is buying, so it gets a
+ * board, not a footnote.
+ */
+function Bucket({ state, now }: { state: VaultStateApi; now: number }) {
+  const isUp = state.side === "UP";
+  if (state.bucket.length === 0) {
+    return <p className="dim">Between windows — the next 15m markets list here the moment they open.</p>;
+  }
+  const holding = state.bucket.some((m) => m.held !== null);
+  return (
+    <>
+      <div className="bucket">
+        {state.bucket.map((market) => {
+          const seconds = market.expiry - now;
+          return (
+            <div className="bucket-tile" key={market.marketId}>
+              <div className="bucket-market">
+                {market.asset} {market.interval}
+                <span className={isUp ? "up" : "down"}> {isUp ? "▲ up" : "▼ down"}</span>
+              </div>
+              <div className="bucket-price">
+                {market.price === null ? "—" : market.price.toFixed(3)}
+                <span className="bucket-unit"> /contract</span>
+              </div>
+              <div className="bucket-meta">
+                {market.held !== null
+                  ? `holding ${market.held.toFixed(1)} contracts`
+                  : state.phase === "OPEN"
+                    ? "in the next buy"
+                    : "next window joins here"}
+              </div>
+              <div className="bucket-meta dim">
+                {seconds > 0
+                  ? `closes in ${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+                  : "settling…"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <p className="note" style={{ marginTop: 8 }}>
+        {holding
+          ? `The pot holds the same number of contracts in each — win ${state.bucket.length > 1 ? "some" : "it"} and the payout re-enters every next window automatically.`
+          : `Each market gets the same number of contracts, so the payoff is “how many of them closed ${isUp ? "up" : "down"}”, never a single pick.`}
+      </p>
+    </>
   );
 }

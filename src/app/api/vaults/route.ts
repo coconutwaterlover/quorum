@@ -1,4 +1,5 @@
 import { NextResponse, after } from "next/server";
+import { discover } from "@/somnia/discover";
 import { keeperTick, readVaultState, vaultConfigs } from "@/somnia/vaults";
 
 export const dynamic = "force-dynamic";
@@ -20,9 +21,14 @@ const TICK_DEBOUNCE_MS = 45_000;
 export async function GET() {
   try {
     const configs = vaultConfigs();
+    // One book snapshot feeds both vaults' bucket views; a failure here only
+    // costs the bucket display, never the vault state itself.
+    const legs = await discover()
+      .then((d) => d.legs)
+      .catch(() => []);
     const [up, down] = await Promise.all(
       configs.map((config) =>
-        readVaultState(config).catch((error) => ({
+        readVaultState(config, legs).catch((error) => ({
           error: error instanceof Error ? error.message : String(error),
         })),
       ),
