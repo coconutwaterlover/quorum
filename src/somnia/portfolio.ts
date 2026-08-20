@@ -136,6 +136,30 @@ export async function loadPortfolio(
   };
 }
 
+/**
+ * The JSON-safe shape of a position.
+ *
+ * `rawAmount` has to stay a bigint on the server — it is what `redeemMany`
+ * takes, and rounding it through a float would redeem the wrong number of
+ * tokens — but a bigint cannot be serialized, so an account that actually holds
+ * something would fail the response rather than the empty account used to smoke
+ * test it. It crosses the wire as a decimal string.
+ */
+export type HeldPositionWire = Omit<HeldPosition, "rawAmount"> & { readonly rawAmount: string };
+
+export interface PortfolioWire extends Omit<PortfolioView, "live" | "claimable"> {
+  readonly live: readonly HeldPositionWire[];
+  readonly claimable: readonly HeldPositionWire[];
+}
+
+export function toWire(view: PortfolioView): PortfolioWire {
+  const wire = (position: HeldPosition): HeldPositionWire => ({
+    ...position,
+    rawAmount: position.rawAmount.toString(),
+  });
+  return { ...view, live: view.live.map(wire), claimable: view.claimable.map(wire) };
+}
+
 export interface SweepResult {
   readonly claimed: number;
   readonly positions: number;

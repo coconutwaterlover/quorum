@@ -6,7 +6,7 @@ import type { IndexQuote } from "@/engine/quote";
 import type { BacktestResult } from "@/engine/backtest";
 import type { Leg, WeightedLeg } from "@/engine/types";
 import type { BasketPlan, BasketReceipt } from "@/somnia/execute";
-import type { PortfolioView, SweepResult } from "@/somnia/portfolio";
+import type { PortfolioWire, SweepResult } from "@/somnia/portfolio";
 import type { DeskSnapshot } from "@/somnia/desk";
 import { CorrelationGrid, EquityCurves, PayoffLadder, RiskBars, type Rung } from "./charts";
 
@@ -52,7 +52,7 @@ export default function Desk() {
   const [receipt, setReceipt] = useState<BasketReceipt | null>(null);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   const [account, setAccount] = useState("");
-  const [portfolio, setPortfolio] = useState<PortfolioView | null>(null);
+  const [portfolio, setPortfolio] = useState<PortfolioWire | null>(null);
   const [portfolioError, setPortfolioError] = useState<string | null>(null);
   const [portfolioBusy, setPortfolioBusy] = useState(false);
   const [sweep, setSweep] = useState<SweepResult | null>(null);
@@ -171,7 +171,7 @@ export default function Desk() {
         setPortfolioError(body.error ?? "could not read that account");
         setPortfolio(null);
       } else {
-        setPortfolio(body as PortfolioView);
+        setPortfolio(body as PortfolioWire);
         setPortfolioError(null);
       }
     } finally {

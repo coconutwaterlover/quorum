@@ -175,6 +175,30 @@ quietly become independence.
 
 ---
 
+## What is verified, and what isn't
+
+Worth being precise about, because a demo that implies more than it proved is worse than one that
+says where the line is.
+
+**Verified against live Shannon data.** Market discovery and the on-chain status gate, four-sided
+books and depth, basket pricing, the correlation matrix and per-series autocorrelations over ~2,300
+settled windows, the replay, order construction, and reading outcome-token balances for a real
+account (tested against the market makers quoting these books — 2,010 contracts across two positions,
+which is what caught a bigint that could not be serialized). The engine has 66 unit tests over pure
+functions, and the replay's realized sd reduction lands within 1.5 points of what the correlation
+model predicts analytically, which is a real check that the two halves agree.
+
+**Not verified end to end.** `placeOrder` and `redeemMany` have never been sent from this repo.
+Shannon's STT faucet is browser-gated, so there was no funded key to send with. The order parameters
+are built by the SDK's own `quoteBinaryStakeOverBook` and shown in full in the plan table before
+anything is sent, and the revert paths follow the documented contract — but "should work" is not
+"did work", and the first person with a funded key should expect to find something here.
+
+The claimable branch is also unexercised by live data: every market maker on this venue redeems
+promptly, so nothing settled and unclaimed was available to read.
+
+---
+
 ## Things that bit us
 
 Worth reading before you build on event contracts, because each of these was a bug here first.

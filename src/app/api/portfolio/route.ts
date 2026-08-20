@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import type { Address } from "viem";
-import { deskAccount, loadPortfolio, sweepRedeem } from "@/somnia/portfolio";
+import { deskAccount, loadPortfolio, sweepRedeem, toWire } from "@/somnia/portfolio";
 import { tradingMode } from "@/somnia/exchange";
 
 export const dynamic = "force-dynamic";
@@ -15,7 +15,7 @@ export async function GET(request: Request) {
     );
   }
   try {
-    return NextResponse.json(await loadPortfolio(account));
+    return NextResponse.json(toWire(await loadPortfolio(account)));
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }
