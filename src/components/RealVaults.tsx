@@ -23,7 +23,7 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
-import { quorumVaultAbi } from "@/somnia/vaultAbi";
+import { quorumVaultV3Abi as quorumVaultAbi } from "@/somnia/vaultAbi";
 import { shannon } from "@/app/providers";
 
 const TEST_USDC = "0x70a86D8842FB63C4Ad2b7cdddF530eBf1BB25d8E" as Address;
@@ -74,11 +74,11 @@ interface VaultStateApi {
   pendingDeposits: number;
   pendingWithdraws: number;
   bucket: BucketMarket[];
-  executor: {
-    liveContracts: number;
-    livePositions: { series: string; contracts: number; expiry: number }[];
-    claimable: number;
-    idleCollateral: number;
+  brain: {
+    address: Address;
+    fireCount: number;
+    windowsFed: number;
+    bondStt: number;
   } | null;
 }
 
@@ -207,23 +207,36 @@ export default function RealVaults() {
       {(up || down) && <GetCollateral wallet={wallet} />}
 
       <section className="panel">
-        <h2>How the shared pot stays fair</h2>
+        <h2>Nobody runs this</h2>
         <p className="lede">
-          Your shares are never priced off a posted NAV or a mark of open positions. They price only at
-          moments when the vault is <em>flat</em> — everything sitting as plain collateral at the
-          contract — so the price is <code>balance / supply</code>, an on-chain fact anyone can verify in
-          the explorer. Deposits and withdrawals made mid-epoch simply queue for the next flat moment,
-          minutes away on 15-minute windows. That one rule is what closes the classic vault attack
-          (depress a thin book&rsquo;s mark, mint cheap shares, let it resolve): there is never a mark to
-          depress.
+          The vaults trade for themselves: each contract holds its own money, reads the order books
+          on-chain, places its own orders, redeems its own winnings, and settles its own epochs. What
+          wakes it is <em>the chain</em> — a small on-chain brain holds a Somnia Reactivity bond, gets
+          the venue&rsquo;s own market-creation events pushed into it, and fires a self-re-arming
+          heartbeat every window. No server, no keeper, no operator custodying anything. Every moving
+          part is permissionless, so if a callback were ever dropped, anyone could nudge the machine —
+          nudge, not control.
         </p>
+        {(up?.brain ?? down?.brain) && (
+          <p className="note">
+            The brain at{" "}
+            <a href={`https://shannon-explorer.somnia.network/address/${(up?.brain ?? down?.brain)!.address}`}
+              target="_blank" rel="noreferrer">
+              {(up?.brain ?? down?.brain)!.address.slice(0, 10)}…
+            </a>{" "}
+            has fired {(up?.brain ?? down?.brain)!.fireCount} heartbeat(s), fed{" "}
+            {(up?.brain ?? down?.brain)!.windowsFed} market window(s), and holds{" "}
+            {(up?.brain ?? down?.brain)!.bondStt.toFixed(1)} STT of bond — the receipt that nothing
+            else is running.
+          </p>
+        )}
         <p className="callout warn">
-          <strong>The honest limits.</strong> This is a testnet demonstration. The executor key custodies
-          the pot while it is deployed and is trusted to return it — under-returning would be visible
-          on-chain forever as a price drop, but visible is not prevented. And QUP is a bet that markets
-          close up: diversification lowers the noise, not the direction.
+          <strong>The honest limits.</strong> Testnet, unaudited Solidity, free faucet collateral. And
+          QUP is still a bet that markets close up — the bucket lowers the noise, never the direction.
         </p>
       </section>
+
+      <Faq />
     </>
   );
 }
@@ -696,5 +709,101 @@ function Bucket({ state, now }: { state: VaultStateApi; now: number }) {
           : `Each market gets the same number of contracts, so the payoff is “how many of them closed ${isUp ? "up" : "down"}”, never a single pick.`}
       </p>
     </>
+  );
+}
+
+/** The questions people actually ask, answered the way the contracts work. */
+function Faq() {
+  const items: { q: string; a: React.ReactNode }[] = [
+    {
+      q: "What am I actually buying?",
+      a: (
+        <>A share of a pot that holds <b>the same number of contracts of every live 15-minute market</b> on
+        the venue — QUP betting each closes up, QDWN betting each closes down. Equal contracts is the whole
+        design: equal <em>cash</em> would buy 7× more of a cheap market and quietly turn the bucket into a
+        bet on whichever market happens to be a longshot.</>
+      ),
+    },
+    {
+      q: "How are the bucket quotes calculated?",
+      a: (
+        <>Each tile shows the venue&rsquo;s <b>best resting ask for this vault&rsquo;s side</b>, read
+        straight from the pool contract at that moment — for QUP the lowest Up ask; for QDWN the Down ask,
+        which on a binary book is 1 − the best Up bid. It is the price the vault&rsquo;s next contract
+        would actually cost, not an oracle, an average, or anyone&rsquo;s estimate. When the vault enters,
+        it pays at most that price plus a small protective cushion (~3%), and an IOC order refunds
+        whatever doesn&rsquo;t fill.</>
+      ),
+    },
+    {
+      q: "What does “queues for next settle” mean?",
+      a: (
+        <>Your shares are only ever priced when the vault is <b>flat</b> — everything sitting as plain
+        collateral at the contract — because then the price is <code>balance ÷ supply</code>, an on-chain
+        fact nobody can bend. While the money is out in the markets there is no honest price, so a deposit
+        or withdrawal made mid-epoch waits in a queue and executes at the next settle&rsquo;s single
+        snapshot price, the same one for everybody in line. On 15-minute windows that wait is minutes.
+        This one rule is what makes the shared pot safe: the classic vault attack (push a thin book&rsquo;s
+        mark, mint cheap shares, let it resolve) needs a mark to push — here there is never one.</>
+      ),
+    },
+    {
+      q: "Where does the share price on the chart come from?",
+      a: (
+        <>Every dot is an <code>EpochSettled</code> event: the moment the vault came back to flat and its
+        price was the actual collateral balance divided by supply. Nothing between settles is plotted
+        because nothing between settles is a price the contract stands behind.</>
+      ),
+    },
+    {
+      q: "Why does the price move so much per epoch?",
+      a: (
+        <>Each epoch the vault stakes about a third of the pot across the bucket. BTC and ETH close the
+        same way in most windows, so &ldquo;the whole bucket lost&rdquo; happens regularly and costs about
+        a third; &ldquo;the whole bucket won&rdquo; pays the odds on that third. A third — not everything
+        — because staking the full pot each window is a fast road to zero, which the first hour of this
+        demo proved empirically. QUP and QDWN hold opposite sides of the same windows, so their charts
+        move opposite ways.</>
+      ),
+    },
+    {
+      q: "What’s the difference between the two deposit buttons?",
+      a: (
+        <>The main button is <b>one transaction with no approval</b>: the test collateral&rsquo;s faucet is
+        open to anyone — contracts included — so the vault mints the tUSDC to itself inside your deposit
+        call. That is only honest because the same faucet is free to every wallet anyway; nobody is
+        diluted by anything they couldn&rsquo;t have done themselves. The secondary button deposits tUSDC
+        you already hold, which needs the usual one-time ERC-20 approval first.</>
+      ),
+    },
+    {
+      q: "How do I get my money out?",
+      a: (
+        <>Press withdraw. If the vault is flat you are paid instantly at the exact balance price; if the
+        money is out working, your shares queue and pay at the next settle, minutes later. There is no
+        lock-up, no notice period, and no fee — the only cost anywhere in the system is the markets&rsquo;
+        own bid-ask spread.</>
+      ),
+    },
+    {
+      q: "Who can touch the pot?",
+      a: (
+        <>Only the vault contract itself. Deposits go to the contract, orders are placed by the contract,
+        winnings are redeemed to the contract, and withdrawals are paid by the contract. The brain that
+        wakes it can say <em>when</em>, never <em>where the money goes</em>. The honest caveats are the
+        ones that remain: this is unaudited testnet Solidity, and a bucket lowers variance, not the odds.</>
+      ),
+    },
+  ];
+  return (
+    <section className="panel">
+      <h2>FAQ</h2>
+      {items.map((item) => (
+        <details key={item.q} className="faq">
+          <summary>{item.q}</summary>
+          <p>{item.a}</p>
+        </details>
+      ))}
+    </section>
   );
 }

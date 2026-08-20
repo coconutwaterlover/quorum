@@ -1,27 +1,19 @@
 /**
- * The two on-chain vaults (QUP / QDWN) and the keeper that runs their epochs.
+ * The self-driving vaults (QUP / QDWN v3) and their reactivity brain.
  *
- * The contract holds the trust story (shares only ever price while flat); this
- * module is the muscle: each tick it, per vault —
+ * There is no keeper anymore — the chain runs the machine. The QuorumBrain
+ * contract owns two reactivity subscriptions (the venue's MarketCreated event
+ * stream, which feeds the vaults their buckets, and a self-re-arming
+ * quarter-hour heartbeat that calls the vaults' permissionless runEpoch), and
+ * the vaults trade, redeem and settle entirely on-chain.
  *
- *   1. redeems whatever the oracle settled into the executor wallet;
- *   2. if the epoch's positions are all settled and redeemed, returns every
- *      collateral cent to the vault and calls settleEpoch — the price the
- *      holders get IS the returned balance, so this step is the honesty;
- *   3. if the vault is flat and holding cash with live windows open, takes the
- *      pot out and buys this side of the 15m cross-section, equal contracts.
- *
- * 15m windows only, on purpose: epochs stay short enough that "deposits queue
- * for the next settle" means minutes, and the fast cadence is the one with
- * hundreds of settled windows behind the numbers page's claims.
+ * What remains here server-side is a HEALER: everything on the contracts is
+ * permissionless by design, so if a callback is ever dropped or the brain's
+ * bond runs dry, any funded key can poke the machine back to life. That is the
+ * whole job of keeperTick now — rearm a stale heartbeat, poke the vaults —
+ * and doing it when nothing is wrong is merely a cheap no-op.
  */
 
-import {
-  SomniaMarkets,
-  SOMNIA_MAINNET_ADDRESSES,
-  SOMNIA_TESTNET_ADDRESSES,
-} from "@somnia-chain/markets-sdk";
-import { somniaMainnet, somniaShannon } from "@somnia-chain/markets-sdk/chains";
 import {
   createPublicClient,
   createWalletClient,
@@ -31,53 +23,30 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { equalWeights } from "@/engine/quote";
-import type { Side, WeightedLeg } from "@/engine/types";
-import { discover } from "./discover";
-import { buyBasket, planBasket } from "./execute";
-import { loadPortfolio, sweepRedeem } from "./portfolio";
-import { venueConfig, collateralAddress } from "./exchange";
-import { quorumVaultAbi } from "./vaultAbi";
-
-const ERC20_ABI = [
-  {
-    name: "transfer",
-    type: "function",
-    stateMutability: "nonpayable",
-    inputs: [{ type: "address", name: "to" }, { type: "uint256", name: "amount" }],
-    outputs: [{ type: "bool" }],
-  },
-  {
-    name: "balanceOf",
-    type: "function",
-    stateMutability: "view",
-    inputs: [{ type: "address", name: "account" }],
-    outputs: [{ type: "uint256" }],
-  },
-] as const;
+import type { Leg, Side } from "@/engine/types";
+import { venueConfig } from "./exchange";
+import { quorumVaultV3Abi, quorumBrainAbi } from "./vaultAbi";
+import { somniaMainnet, somniaShannon } from "@somnia-chain/markets-sdk/chains";
 
 export interface VaultConfig {
   readonly symbol: "QUP" | "QDWN";
   readonly side: Side;
   readonly address: Address | null;
-  readonly executorKey: Hex | null;
 }
 
 export function vaultConfigs(): VaultConfig[] {
   return [
-    {
-      symbol: "QUP",
-      side: "UP",
-      address: (process.env.NEXT_PUBLIC_QUP_ADDRESS as Address) || null,
-      executorKey: (process.env.QUORUM_EXEC_UP_KEY as Hex) || null,
-    },
-    {
-      symbol: "QDWN",
-      side: "DOWN",
-      address: (process.env.NEXT_PUBLIC_QDWN_ADDRESS as Address) || null,
-      executorKey: (process.env.QUORUM_EXEC_DOWN_KEY as Hex) || null,
-    },
+    { symbol: "QUP", side: "UP", address: (process.env.NEXT_PUBLIC_QUP_ADDRESS as Address) || null },
+    { symbol: "QDWN", side: "DOWN", address: (process.env.NEXT_PUBLIC_QDWN_ADDRESS as Address) || null },
   ];
+}
+
+export function brainAddress(): Address | null {
+  return (process.env.NEXT_PUBLIC_BRAIN_ADDRESS as Address) || null;
+}
+
+function healerKey(): Hex | null {
+  return (process.env.QUORUM_EXEC_UP_KEY as Hex) || null;
 }
 
 function rpcUrl(): string {
@@ -90,21 +59,6 @@ function chain() {
 
 export function vaultPublicClient() {
   return createPublicClient({ chain: chain(), transport: http(rpcUrl()) });
-}
-
-function executorWallet(key: Hex) {
-  return createWalletClient({ account: privateKeyToAccount(key), chain: chain(), transport: http(rpcUrl()) });
-}
-
-function executorExchange(key: Hex): SomniaMarkets {
-  const cfg = venueConfig();
-  return new SomniaMarkets({
-    indexerUrl: cfg.indexerUrl,
-    chain: chain(),
-    wsRpcUrl: cfg.wsRpcUrl,
-    addresses: cfg.network === "mainnet" ? SOMNIA_MAINNET_ADDRESSES : SOMNIA_TESTNET_ADDRESSES,
-    privateKey: key,
-  });
 }
 
 /** One market in the bucket a vault is (or is about to be) betting on. */
@@ -127,36 +81,32 @@ export interface VaultState {
   readonly address: Address;
   readonly phase: "OPEN" | "DEPLOYED";
   readonly epoch: number;
-  /** Priced pot in the vault, human units. Zero while deployed. */
   readonly cash: number;
   readonly totalSupply: number;
-  /** 1e18-scaled prices flattened to floats for display. */
   readonly openPrice: number;
   readonly lastSettlePrice: number | null;
   readonly pendingDeposits: number;
   readonly pendingWithdraws: number;
   readonly pendingDepositAssets: number;
-  /** The live markets this vault's pot is spread across. */
   readonly bucket: readonly BucketMarket[];
-  /** What the executor currently holds for this vault. */
-  readonly executor: {
+  /** The brain keeping it alive, for the UI to link and show. */
+  readonly brain: {
     readonly address: Address;
-    readonly liveContracts: number;
-    readonly livePositions: { series: string; contracts: number; expiry: number }[];
-    readonly claimable: number;
-    readonly idleCollateral: number;
+    readonly fireCount: number;
+    readonly windowsFed: number;
+    readonly bondStt: number;
   } | null;
 }
 
 export async function readVaultState(
   config: VaultConfig,
-  legs?: readonly import("@/engine/types").Leg[],
+  legs?: readonly Leg[],
 ): Promise<VaultState | null> {
   if (!config.address) return null;
   const client = vaultPublicClient();
-  const vault = { address: config.address, abi: quorumVaultAbi } as const;
+  const vault = { address: config.address, abi: quorumVaultV3Abi } as const;
 
-  const [phase, epoch, cashRaw, supply, openPriceRaw, lastPriceRaw, queues, pendingAssets] =
+  const [phase, epoch, cashRaw, supply, openPriceRaw, lastPriceRaw, queues, pendingAssets, windowsView] =
     await Promise.all([
       client.readContract({ ...vault, functionName: "phase" }),
       client.readContract({ ...vault, functionName: "epoch" }),
@@ -166,37 +116,22 @@ export async function readVaultState(
       client.readContract({ ...vault, functionName: "lastSettlePrice" }),
       client.readContract({ ...vault, functionName: "queueLengths" }),
       client.readContract({ ...vault, functionName: "pendingDepositAssets" }),
+      client.readContract({ ...vault, functionName: "windowsView" }),
     ]);
 
-  let executor: VaultState["executor"] = null;
-  if (config.executorKey) {
-    const account = privateKeyToAccount(config.executorKey).address;
-    const [view, idle] = await Promise.all([
-      loadPortfolio(account, { windowsBack: 12 }),
-      client.readContract({
-        address: collateralAddress(),
-        abi: ERC20_ABI,
-        functionName: "balanceOf",
-        args: [account],
-      }),
-    ]);
-    const mine = view.live.filter((p) => p.side === config.side);
-    executor = {
-      address: account,
-      liveContracts: mine.reduce((sum, p) => sum + p.contracts, 0),
-      livePositions: mine.map((p) => ({ series: p.series, contracts: p.contracts, expiry: p.expiry })),
-      claimable: view.claimable
-        .filter((p) => p.side === config.side)
-        .reduce((sum, p) => sum + p.claimable, 0),
-      idleCollateral: Number(formatUnits(idle, 6)),
-    };
+  // What the vault holds, straight from its own windows and the ERC-6909
+  // balances windowsView reads for us.
+  const [windowList, held] = windowsView as unknown as [
+    { marketId: string; expiry: bigint; entered: boolean }[],
+    bigint[],
+  ];
+  const heldByMarket = new Map<string, number>();
+  for (let i = 0; i < windowList.length; i++) {
+    if (windowList[i].entered && held[i] > 0n) {
+      heldByMarket.set(windowList[i].marketId.toLowerCase(), Number(formatUnits(held[i], 6)));
+    }
   }
 
-  // The bucket: the 15m cross-section this vault trades, seen from its own
-  // side, with the contracts it holds in each window right now.
-  const heldBySeries = new Map(
-    (executor?.livePositions ?? []).map((p) => [p.series, p.contracts]),
-  );
   const bucket: BucketMarket[] = (legs ?? [])
     .filter((l) => l.side === config.side && l.interval === "15m")
     .sort((a, b) => a.series.localeCompare(b.series))
@@ -208,8 +143,28 @@ export async function readVaultState(
       price: l.ask ?? l.mid,
       expiry: l.expiry,
       question: l.question,
-      held: heldBySeries.get(l.series) ?? null,
+      held: heldByMarket.get(l.marketId.toLowerCase()) ?? null,
     }));
+
+  let brain: VaultState["brain"] = null;
+  const brainAddr = brainAddress();
+  if (brainAddr) {
+    try {
+      const [fireCount, windowsFed, bond] = await Promise.all([
+        client.readContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "fireCount" }),
+        client.readContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "windowsFed" }),
+        client.getBalance({ address: brainAddr }),
+      ]);
+      brain = {
+        address: brainAddr,
+        fireCount: Number(fireCount),
+        windowsFed: Number(windowsFed),
+        bondStt: Number(formatUnits(bond, 18)),
+      };
+    } catch {
+      brain = null;
+    }
+  }
 
   return {
     symbol: config.symbol,
@@ -217,145 +172,72 @@ export async function readVaultState(
     address: config.address,
     phase: Number(phase) === 0 ? "OPEN" : "DEPLOYED",
     epoch: Number(epoch),
-    cash: Number(formatUnits(cashRaw, 6)),
-    totalSupply: Number(formatUnits(supply, 6)),
-    openPrice: Number(formatUnits(openPriceRaw, 18)),
-    lastSettlePrice: lastPriceRaw === 0n ? null : Number(formatUnits(lastPriceRaw, 18)),
-    pendingDeposits: Number(queues[0]),
-    pendingWithdraws: Number(queues[1]),
-    pendingDepositAssets: Number(formatUnits(pendingAssets, 6)),
+    cash: Number(formatUnits(cashRaw as bigint, 6)),
+    totalSupply: Number(formatUnits(supply as bigint, 6)),
+    openPrice: Number(formatUnits(openPriceRaw as bigint, 18)),
+    lastSettlePrice: (lastPriceRaw as bigint) === 0n ? null : Number(formatUnits(lastPriceRaw as bigint, 18)),
+    pendingDeposits: Number((queues as [bigint, bigint])[0]),
+    pendingWithdraws: Number((queues as [bigint, bigint])[1]),
+    pendingDepositAssets: Number(formatUnits(pendingAssets as bigint, 6)),
     bucket,
-    executor,
+    brain,
   };
 }
 
 export interface KeeperAction {
-  readonly vault: "QUP" | "QDWN";
+  readonly vault: string;
   readonly action: string;
   readonly detail: string;
 }
 
-const MIN_DEPLOY = 1; // don't bother trading pots under 1 tUSDC
-const MIN_HEADROOM_SECONDS = 180;
 /**
- * Fraction of the pot staked per epoch. All-in staking is a martingale to
- * zero: the bucket protects across markets *within* a window, but BTC and ETH
- * close the same way ~60% of the time, so "every market lost" hits every few
- * epochs and multiplies an all-in pot by ~0 — which is exactly what flattened
- * QUP from 4.57 to 0.10 in its first hour live. A third per epoch keeps the
- * upside compounding while a lost epoch costs a third, not everything.
+ * The healer pass. Rearm the heartbeat if it is stale, poke the vaults if a
+ * fire seems overdue. All targets are permissionless; a pass that finds
+ * nothing wrong costs one small transaction at most.
  */
-const STAKE_FRACTION = Number(process.env.QUORUM_STAKE_FRACTION ?? 0.33);
-
-/** One keeper pass over both vaults. Every step is reported, including skips. */
 export async function keeperTick(): Promise<KeeperAction[]> {
   const actions: KeeperAction[] = [];
-  const discovery = await discover();
+  const brainAddr = brainAddress();
+  const key = healerKey();
+  if (!brainAddr || !key) {
+    return [{ vault: "brain", action: "skip", detail: "brain or healer key not configured" }];
+  }
 
-  for (const config of vaultConfigs()) {
-    if (!config.address || !config.executorKey) {
-      actions.push({ vault: config.symbol, action: "skip", detail: "not configured" });
-      continue;
+  const client = vaultPublicClient();
+  const wallet = createWalletClient({
+    account: privateKeyToAccount(key),
+    chain: chain(),
+    transport: http(rpcUrl()),
+  });
+
+  try {
+    const armedForMs = Number(
+      await client.readContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "armedForMs" }),
+    );
+    const lateBy = Date.now() - armedForMs;
+
+    if (armedForMs !== 0 && lateBy < 60_000) {
+      actions.push({ vault: "brain", action: "healthy", detail: `armed for ${new Date(armedForMs).toISOString()}` });
+      return actions;
     }
-    const symbol = config.symbol;
+
+    // The heartbeat is overdue (or was never armed): do its job once and re-arm.
     try {
-      const state = await readVaultState(config);
-      if (!state || !state.executor) continue;
-      const wallet = executorWallet(config.executorKey);
-      const client = vaultPublicClient();
-      const exchange = executorExchange(config.executorKey);
-
-      // 1. Claim whatever settled for this side.
-      const view = await loadPortfolio(state.executor.address, { windowsBack: 12 });
-      const claimables = view.claimable.filter((p) => p.side === config.side);
-      if (claimables.length > 0) {
-        const swept = await sweepRedeem({ ...view, claimable: claimables }, exchange);
-        actions.push({
-          vault: symbol,
-          action: swept.error ? "redeem-failed" : "redeemed",
-          detail: swept.error ?? `${swept.claimed.toFixed(2)} from ${swept.positions} position(s)`,
-        });
-        if (swept.error) continue;
-      }
-
-      // 2. All settled and claimed -> hand everything back and close the epoch.
-      const liveMine = view.live.filter((p) => p.side === config.side);
-      if (state.phase === "DEPLOYED" && liveMine.length === 0 && claimables.length === 0) {
-        const idle = await client.readContract({
-          address: collateralAddress(),
-          abi: ERC20_ABI,
-          functionName: "balanceOf",
-          args: [state.executor.address],
-        });
-        if (idle > 0n) {
-          const hash = await wallet.writeContract({
-            address: collateralAddress(),
-            abi: ERC20_ABI,
-            functionName: "transfer",
-            args: [config.address, idle],
-          });
-          await client.waitForTransactionReceipt({ hash });
-        }
-        const hash = await wallet.writeContract({
-          address: config.address,
-          abi: quorumVaultAbi,
-          functionName: "settleEpoch",
-        });
-        const receipt = await client.waitForTransactionReceipt({ hash });
-        actions.push({
-          vault: symbol,
-          action: receipt.status === "reverted" ? "settle-reverted" : "settled",
-          detail: `epoch ${state.epoch} closed, returned ${formatUnits(idle, 6)}`,
-        });
-        continue;
-      }
-
-      // 3. Flat with cash and open windows -> take the pot out and buy the side.
-      const legs = discovery.legs.filter(
-        (l) =>
-          l.side === config.side &&
-          l.interval === "15m" &&
-          l.ask !== null &&
-          l.expiry - discovery.asOf > MIN_HEADROOM_SECONDS,
-      );
-      if (state.phase === "OPEN" && state.cash >= MIN_DEPLOY && legs.length >= 2) {
-        const hash = await wallet.writeContract({
-          address: config.address,
-          abi: quorumVaultAbi,
-          functionName: "deployFunds",
-        });
-        const receipt = await client.waitForTransactionReceipt({ hash });
-        if (receipt.status === "reverted") {
-          // Another invocation won the race; nothing lost, nothing bought.
-          actions.push({ vault: symbol, action: "deploy-raced", detail: "another tick deployed first" });
-          continue;
-        }
-        const weights = equalWeights(legs.length);
-        const weighted: WeightedLeg[] = legs.map((leg, i) => ({ ...leg, weightBp: weights[i] }));
-        // The contract hands the whole pot to the executor; only this fraction
-        // is put at risk. The rest sits idle and returns at settle.
-        const plan = planBasket(weighted, discovery.books, state.cash * STAKE_FRACTION);
-        const receipt2 = await buyBasket(plan, discovery.books, { exchange });
-        actions.push({
-          vault: symbol,
-          action: "deployed",
-          detail: `epoch ${state.epoch}: ${receipt2.contractsFilled.toFixed(2)} contracts across ${legs.length} windows for ${receipt2.collateralSpent.toFixed(2)}${receipt2.legsMissed ? `, ${receipt2.legsMissed} leg(s) missed` : ""}`,
-        });
-        continue;
-      }
-
-      actions.push({
-        vault: symbol,
-        action: "idle",
-        detail: `phase ${state.phase}, cash ${state.cash.toFixed(2)}, ${liveMine.length} live position(s), ${legs.length} enterable window(s)`,
-      });
+      const hash = await wallet.writeContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "pokeVaults" });
+      await client.waitForTransactionReceipt({ hash });
+      actions.push({ vault: "brain", action: "poked", detail: `heartbeat ${Math.round(lateBy / 1000)}s late — ran the vaults manually` });
     } catch (error) {
-      actions.push({
-        vault: symbol,
-        action: "error",
-        detail: error instanceof Error ? error.message : String(error),
-      });
+      actions.push({ vault: "brain", action: "poke-failed", detail: String(error instanceof Error ? error.message : error).slice(0, 120) });
     }
+    try {
+      const hash = await wallet.writeContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "rearm" });
+      await client.waitForTransactionReceipt({ hash });
+      actions.push({ vault: "brain", action: "rearmed", detail: "next heartbeat scheduled" });
+    } catch {
+      actions.push({ vault: "brain", action: "rearm-skipped", detail: "already armed for the next boundary" });
+    }
+  } catch (error) {
+    actions.push({ vault: "brain", action: "error", detail: String(error instanceof Error ? error.message : error).slice(0, 160) });
   }
   return actions;
 }

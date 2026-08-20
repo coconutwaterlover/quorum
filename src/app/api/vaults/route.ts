@@ -34,7 +34,7 @@ export async function GET() {
       ),
     );
 
-    const configured = configs.some((c) => c.address && c.executorKey);
+    const configured = configs.some((c) => c.address);
     if (configured && Date.now() - lastTickAt > TICK_DEBOUNCE_MS) {
       lastTickAt = Date.now();
       after(async () => {
