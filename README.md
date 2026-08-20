@@ -3,6 +3,11 @@
 **Index contracts for [dreamDEX event contracts](https://docs.dreamdex.io/developers/event-contracts).**
 Don't pick a market — pick how many of them have to be right.
 
+**Live on Somnia Shannon** — [QUP `0xf93ed67f…e99a`](https://shannon-explorer.somnia.network/address/0xf93ed67f014d02c4b76da20795b472d241d1e99a)
+and [QDWN `0x1e120df1…7bd2`](https://shannon-explorer.somnia.network/address/0x1e120df1b33aa5c7fcd54f1c9a10aeef7b787bd2),
+holding real (testnet) deposits from real wallets. QUP's first epoch settled at 2.44 — both 15m windows
+closed up — while QDWN's settled at 0.095, the same windows from the other side.
+
 Three front doors, one engine:
 
 - **The vaults** (`/`) — the real, shared ones: **QUP** bets every live market closes up, **QDWN**
