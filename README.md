@@ -27,9 +27,12 @@ it can recover.
 
 The honest trust boundary: the **executor key custodies the pot while deployed** and is trusted to
 return it. Under-returning would be visible on-chain forever as a price drop — visible, not
-prevented. Testnet demonstration, not a custody design. The epoch loop (`redeem → return → settle →
-deploy → buy`) runs as a Vercel cron hitting `/api/keeper` every minute, each step guarded by
-on-chain phase checks so overlapping invocations revert harmlessly instead of double-spending.
+prevented. Testnet demonstration, not a custody design. The epoch loop (`redeem → return → settle → deploy → buy`)
+rides on the page's own polling: each `/api/vaults` response schedules one debounced keeper pass
+post-response, so any open tab keeps the vaults rolling (per-minute crons are a paid Vercel feature;
+a daily cron on `/api/keeper` is the dead-man fallback, and hitting it with the `CRON_SECRET` works
+from any external scheduler). Every step is guarded by on-chain phase checks, so overlapping passes
+revert harmlessly instead of double-spending.
 
 A dreamDEX event contract is one Bernoulli draw. Fifteen minutes later it paid 1 or it paid 0, and
 that is the entire distribution. Quorum buys a **slice of every live window at once**: one unit costs
