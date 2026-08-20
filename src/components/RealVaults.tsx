@@ -13,7 +13,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { formatUnits, parseUnits, type Address } from "viem";
+import { formatUnits, maxUint256, parseUnits, type Address } from "viem";
 import {
   useAccount,
   useConnect,
@@ -190,8 +190,7 @@ export default function RealVaults() {
           <h2>Not deployed yet</h2>
           <p className="lede">
             The QUP/QDWN contracts are not configured on this deployment — set{" "}
-            <code>NEXT_PUBLIC_QUP_ADDRESS</code> / <code>NEXT_PUBLIC_QDWN_ADDRESS</code>. The paper
-            sandbox at <a href="/paper">/paper</a> works without them.
+            <code>NEXT_PUBLIC_QUP_ADDRESS</code> / <code>NEXT_PUBLIC_QDWN_ADDRESS</code>.
           </p>
         </section>
       )}
@@ -331,12 +330,15 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
                   () =>
                     writeContract({
                       address: TEST_USDC, abi: erc20Abi, functionName: "approve",
-                      args: [state.address, raw],
+                      // Unlimited, once: every deposit after this is one
+                      // transaction. Testnet collateral, so the usual reason to
+                      // meter approvals does not apply.
+                      args: [state.address, maxUint256],
                     }),
-                  "approving…",
+                  "approving (one-time)…",
                 )
               }>
-              Approve tUSDC
+              Approve once, then 1-tx deposits
             </button>
           ) : (
             <button className="primary" disabled={busy || amount <= 0}
@@ -526,49 +528,67 @@ function Dashboard({
 }
 
 function PriceChart({ history }: { history: HistoryApi | null }) {
-  // Every vault opens at exactly 1.00 by construction, so both lines are
-  // anchored there — a first settle then reads as a move, not a floating dot.
-  const anchor: HistoryPoint = { epoch: 0, price: 1, supply: 0, at: null };
-  const up = history?.up.length ? [anchor, ...history.up] : [];
-  const down = history?.down.length ? [anchor, ...history.down] : [];
-  if (up.length + down.length === 0) {
+  // Both vaults launched at 1.00, so both lines anchor there, just before the
+  // earliest settle. X is wall-clock time — epoch counts differ between the
+  // vaults, so indexing by epoch would misalign events that happened together.
+  // Y is logarithmic: these are multiplicative returns, and on a linear axis a
+  // vault living below 1.00 reads as a flat line no matter what it does.
+  const raw = [...(history?.up ?? []), ...(history?.down ?? [])];
+  const timed = raw.filter((p) => p.at !== null);
+  if (timed.length === 0) {
     return <p className="dim">No settles yet — the first epoch is still out working.</p>;
   }
+  const t0 = Math.min(...timed.map((p) => p.at!)) - 600;
+  const t1 = Math.max(...timed.map((p) => p.at!));
+  const anchor: HistoryPoint = { epoch: 0, price: 1, supply: 0, at: t0 };
+  const up = history?.up.length ? [anchor, ...history.up.filter((p) => p.at !== null)] : [];
+  const down = history?.down.length ? [anchor, ...history.down.filter((p) => p.at !== null)] : [];
 
   const width = 720;
-  const height = 200;
-  const pad = { left: 44, right: 12, top: 12, bottom: 24 };
+  const height = 210;
+  const pad = { left: 46, right: 12, top: 12, bottom: 24 };
   const plotW = width - pad.left - pad.right;
   const plotH = height - pad.top - pad.bottom;
-  // Epoch index drives x per series; both start at launch, so index aligns well
-  // enough without pretending the two vaults settle in lockstep.
-  const maxLen = Math.max(up.length, down.length, 2);
-  const prices = [...up, ...down].map((p) => p.price).concat(1);
-  const lo = Math.min(...prices) * 0.95;
-  const hi = Math.max(...prices) * 1.05;
-  const x = (i: number, n: number) => pad.left + (n <= 1 ? plotW : (i / (maxLen - 1)) * plotW);
-  const y = (v: number) => pad.top + plotH - ((v - lo) / (hi - lo || 1)) * plotH;
+  const logs = [...up, ...down].map((p) => Math.log(Math.max(1e-4, p.price)));
+  const loLog = Math.min(...logs) - 0.15;
+  const hiLog = Math.max(...logs) + 0.15;
+  const x = (at: number) => pad.left + (t1 === t0 ? plotW : ((at - t0) / (t1 - t0)) * plotW);
+  const y = (price: number) =>
+    pad.top + plotH - ((Math.log(Math.max(1e-4, price)) - loLog) / (hiLog - loLog || 1)) * plotH;
   const path = (points: HistoryPoint[]) =>
-    points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i, points.length).toFixed(1)},${y(p.price).toFixed(1)}`).join(" ");
+    points.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.at!).toFixed(1)},${y(p.price).toFixed(1)}`).join(" ");
+  const label = (v: number) => (v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(v >= 0.1 ? 2 : 3));
+
+  // Gridlines at powers of ~2 around 1.00, only the ones inside the window.
+  const grid = [8, 4, 2, 1, 0.5, 0.25, 0.1, 0.05, 0.02].filter(
+    (v) => Math.log(v) > loLog && Math.log(v) < hiLog,
+  );
+  const settles = raw.length;
 
   return (
     <>
       <svg viewBox={`0 0 ${width} ${height}`} width="100%" height={height} role="img"
-        aria-label="Settle price per epoch for QUP and QDWN">
-        <line x1={pad.left} y1={y(1)} x2={width - pad.right} y2={y(1)} stroke="var(--line)" strokeDasharray="2 3" />
-        <text x={pad.left - 6} y={y(1) + 3} textAnchor="end" fontSize="10" fill="var(--dim)" fontFamily="var(--mono)">1.00</text>
-        <text x={pad.left - 6} y={y(hi) + 9} textAnchor="end" fontSize="10" fill="var(--dim)" fontFamily="var(--mono)">{hi.toFixed(2)}</text>
-        <text x={pad.left - 6} y={y(lo) - 2} textAnchor="end" fontSize="10" fill="var(--dim)" fontFamily="var(--mono)">{lo.toFixed(2)}</text>
+        aria-label="Settle price over time for QUP and QDWN, log scale">
+        {grid.map((v) => (
+          <g key={v}>
+            <line x1={pad.left} y1={y(v)} x2={width - pad.right} y2={y(v)}
+              stroke="var(--line)" strokeDasharray={v === 1 ? "4 3" : "1 4"} opacity={v === 1 ? 1 : 0.6} />
+            <text x={pad.left - 6} y={y(v) + 3} textAnchor="end" fontSize="10"
+              fill={v === 1 ? "var(--muted)" : "var(--dim)"} fontFamily="var(--mono)">
+              {label(v)}
+            </text>
+          </g>
+        ))}
         {up.length > 0 && <path d={path(up)} fill="none" stroke="var(--up)" strokeWidth="1.8" />}
         {down.length > 0 && <path d={path(down)} fill="none" stroke="var(--down)" strokeWidth="1.8" />}
-        {up.slice(1).map((p, i) => (
-          <circle key={`u${p.epoch}`} cx={x(i + 1, up.length)} cy={y(p.price)} r="3" fill="var(--up)" />
+        {up.slice(1).map((p) => (
+          <circle key={`u${p.epoch}`} cx={x(p.at!)} cy={y(p.price)} r="3" fill="var(--up)" />
         ))}
-        {down.slice(1).map((p, i) => (
-          <circle key={`d${p.epoch}`} cx={x(i + 1, down.length)} cy={y(p.price)} r="3" fill="var(--down)" />
+        {down.slice(1).map((p) => (
+          <circle key={`d${p.epoch}`} cx={x(p.at!)} cy={y(p.price)} r="3" fill="var(--down)" />
         ))}
         <text x={width - pad.right} y={height - 8} textAnchor="end" fontSize="10" fill="var(--dim)" fontFamily="var(--mono)">
-          {maxLen - 1} settle{maxLen === 2 ? "" : "s"} since launch at 1.00
+          {settles} settle{settles === 1 ? "" : "s"} since launch at 1.00 · log scale
         </text>
       </svg>
       <div className="legend">
@@ -606,9 +626,8 @@ function IntroModal({ onClose }: { onClose: () => void }) {
         <p className="muted" style={{ fontSize: 13 }}>
           Testnet, so it is free to try: gas (STT) from the{" "}
           <a href="https://testnet.somnia.network/" target="_blank" rel="noreferrer">Somnia faucet</a>,
-          collateral from the mint button below. Prefer no wallet at all? The{" "}
-          <a href="/paper">paper sandbox</a> runs the same strategy instantly, and{" "}
-          <a href="/desk">the numbers</a> show the measured evidence behind the whole idea.
+          collateral from the mint button on the page. One approval the first time; after that every
+          deposit is a single transaction.
         </p>
         <button className="primary" onClick={onClose} style={{ marginTop: 6 }}>
           Got it — show me the vaults
