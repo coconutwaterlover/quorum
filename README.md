@@ -19,6 +19,27 @@ Three front doors, one engine:
 - **The numbers** (`/desk`) — the analytical page: books, measured correlations, the payoff ladder,
   the replay, and the exact orders a basket buy becomes.
 
+### Nobody runs it
+
+The v3 vaults are **self-driving**: each contract holds its own collateral and outcome tokens, reads
+the order books on-chain, places its own IOC orders on the pools, redeems its own winnings through the
+module, and settles its own epochs. What wakes it is the chain itself — `QuorumBrain` holds a 32 STT
+Somnia Reactivity bond and owns two subscriptions: the venue MarketCreator's `MarketCreated` events
+(chain-fed bucket discovery, filtered to the 15m cadence in the handler) and a self-re-arming
+quarter-hour heartbeat that calls the vaults' permissionless `runEpoch()`. The first fully unattended
+cycle was observed by a read-only watcher: windows fed at the boundary, both vaults bought their
+buckets 45 seconds later, brain re-armed itself — zero transactions from anyone.
+
+Every moving part is permissionless (`runEpoch`, `rearm`, `pokeVaults`), so a dropped callback is
+healable by any EOA; the server keeps only a tiny healer that does exactly that. The brain can say
+*when*, never *where the money goes*.
+
+Two venue quirks the build surfaced, for anyone following: **pools and market shells are recycled onto
+the next window within minutes of expiry**, so redemption must be keyed by `marketId` through the
+module — any stored address answers for a different market by settle time. And **a 13KB deploy on
+Somnia genuinely costs ~42M gas** — trust the node's estimate; a hand-pinned "sane" limit is an
+out-of-gas revert that still burns the whole limit.
+
 ### How the shared vaults stay fair
 
 The classic attack on pooled prediction vaults is mark manipulation: depress a thin book's quote just
