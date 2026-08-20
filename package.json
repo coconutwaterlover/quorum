@@ -27,6 +27,7 @@
     "wagmi": "^3.7.6"
   },
   "devDependencies": {
+    "@somnia-chain/reactivity-contracts": "^0.2.1",
     "@types/node": "^22.17.2",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
