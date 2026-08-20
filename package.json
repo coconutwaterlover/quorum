@@ -10,19 +10,27 @@
     "start": "next start",
     "test": "tsx --test test/*.test.ts",
     "bot": "tsx bots/roll-sleeve.ts",
-    "census": "tsx bots/census.ts"
+    "census": "tsx bots/census.ts",
+    "compile": "node scripts/compile.mjs",
+    "abis": "node scripts/build-abis.mjs",
+    "deploy:vaults": "node scripts/deploy-vaults.mjs",
+    "vault:e2e": "tsx scripts/vault-e2e.ts",
+    "keeper": "tsx -e \"import('./src/somnia/vaults').then(m=>m.keeperTick()).then(a=>{console.log(a);process.exit(0)})\""
   },
   "dependencies": {
     "@somnia-chain/markets-sdk": "^0.27.0",
+    "@tanstack/react-query": "^5.101.4",
     "next": "^15.5.2",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "viem": "^2.55.13"
+    "viem": "^2.55.13",
+    "wagmi": "^3.7.6"
   },
   "devDependencies": {
     "@types/node": "^22.17.2",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "solc": "^0.8.30",
     "tsx": "^4.20.0",
     "typescript": "^5.9.2"
   }

@@ -3,17 +3,33 @@
 **Index contracts for [dreamDEX event contracts](https://docs.dreamdex.io/developers/event-contracts).**
 Don't pick a market — pick how many of them have to be right.
 
-Two front doors, one engine:
+Three front doors, one engine:
 
-- **The UP vault** (`/`) — the simple one. Deposit paper collateral, get UP units, and watch one
-  balance hold the same number of contracts of every live market, rolling each payout into that
-  market's next window. Real asks in, real bids out, real oracle outcomes; the ledger lives in your
-  browser, so there is no account and no server-side state. It *looks* like a pooled vault but is
-  deliberately not one — each ledger owns its legs directly, so there is no shared NAV to manipulate
-  with a resting order and no other holder to dilute, which is the classic attack on pooled
-  prediction vaults.
-- **The numbers** (`/desk`) — the analytical one: books, correlations, the payoff ladder, the replay,
-  and the exact orders a basket buy becomes.
+- **The vaults** (`/`) — the real, shared ones: **QUP** bets every live market closes up, **QDWN**
+  that they all close down. Connect a wallet on Somnia Shannon, deposit testnet tUSDC, receive the
+  ERC-20 vault token; the pot buys the same number of contracts of every live 15m window and rolls
+  itself epoch after epoch. Anyone can join — the tokens are plain ERC-20s and the pot is shared.
+- **The paper sandbox** (`/paper`) — the same strategy on a private paper ledger in your browser: no
+  wallet, no gas, instant. Real prices and real oracle outcomes; only the money is pretend.
+- **The numbers** (`/desk`) — the analytical page: books, measured correlations, the payoff ladder,
+  the replay, and the exact orders a basket buy becomes.
+
+### How the shared vaults stay fair
+
+The classic attack on pooled prediction vaults is mark manipulation: depress a thin book's quote just
+before depositing, mint cheap shares, let the market resolve. `QuorumVault` closes the whole class by
+never pricing shares off a mark at all. Shares price only at moments when the vault is **flat** —
+everything sitting as plain collateral at the contract — so the price is `balance / supply`, an
+on-chain fact. Mid-epoch deposits and withdrawals queue and execute at the next settle (minutes, on
+15m windows), priced by one snapshot everyone in the queue shares. The share math also carries the
+OZ-style virtual-liquidity offset, so the first-depositor donation-inflation attack costs more than
+it can recover.
+
+The honest trust boundary: the **executor key custodies the pot while deployed** and is trusted to
+return it. Under-returning would be visible on-chain forever as a price drop — visible, not
+prevented. Testnet demonstration, not a custody design. The epoch loop (`redeem → return → settle →
+deploy → buy`) runs as a Vercel cron hitting `/api/keeper` every minute, each step guarded by
+on-chain phase checks so overlapping invocations revert harmlessly instead of double-spending.
 
 A dreamDEX event contract is one Bernoulli draw. Fifteen minutes later it paid 1 or it paid 0, and
 that is the entire distribution. Quorum buys a **slice of every live window at once**: one unit costs
@@ -221,7 +237,8 @@ says where the line is.
 books and depth, basket pricing, the correlation matrix and per-series autocorrelations over ~2,300
 settled windows, the replay, order construction, and reading outcome-token balances for a real
 account (tested against the market makers quoting these books — 2,010 contracts across two positions,
-which is what caught a bigint that could not be serialized). The engine has 92 unit tests, and the replay's realized sd reduction lands within 1.5 points of what the correlation
+which is what caught a bigint that could not be serialized). The engine has 92 unit tests,
+and `scripts/vault-e2e.ts` drives the deployed contracts through a full live epoch. and the replay's realized sd reduction lands within 1.5 points of what the correlation
 model predicts analytically, which is a real check that the two halves agree.
 
 **Not verified end to end.** `placeOrder` and `redeemMany` have never been sent from this repo.

@@ -28,6 +28,7 @@ import { BP } from "@/engine/distribution";
 import { fromHuman, gridFor, toHuman } from "@/engine/units";
 import type { WeightedLeg } from "@/engine/types";
 import type { LegBook } from "./discover";
+import type { SomniaMarkets } from "@somnia-chain/markets-sdk";
 import { signerExchange, tradingMode } from "./exchange";
 
 export interface LegPlan {
@@ -223,17 +224,25 @@ function allocate(
   return plans;
 }
 
-/** Execute a plan. Throws only when trading is switched off; leg errors are reported. */
+/**
+ * Execute a plan. With no `exchange` supplied this is the desk path: gated on
+ * the two env switches and the stake ceiling. The vault keeper passes its own
+ * executor exchange — that key exists solely to trade its vault's pot, so the
+ * desk's ceiling does not apply to it.
+ */
 export async function buyBasket(
   plan: BasketPlan,
   books: ReadonlyMap<string, LegBook>,
-  options: { readonly expirySeconds?: number } = {},
+  options: { readonly expirySeconds?: number; readonly exchange?: SomniaMarkets } = {},
 ): Promise<BasketReceipt> {
-  const mode = tradingMode();
-  const exchange = signerExchange();
-  if (!exchange) throw new Error(`trading is off: ${mode.reason}`);
-  if (plan.stake > mode.maxStake) {
-    throw new Error(`stake ${plan.stake} exceeds QUORUM_MAX_STAKE of ${mode.maxStake}`);
+  let exchange = options.exchange ?? null;
+  if (!exchange) {
+    const mode = tradingMode();
+    exchange = signerExchange();
+    if (!exchange) throw new Error(`trading is off: ${mode.reason}`);
+    if (plan.stake > mode.maxStake) {
+      throw new Error(`stake ${plan.stake} exceeds QUORUM_MAX_STAKE of ${mode.maxStake}`);
+    }
   }
 
   const fills: LegFill[] = [];

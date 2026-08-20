@@ -168,8 +168,11 @@ export interface SweepResult {
 }
 
 /** Redeem everything claimable in one call. Batched, so it is one transaction. */
-export async function sweepRedeem(view: PortfolioView): Promise<SweepResult> {
-  const exchange = signerExchange();
+export async function sweepRedeem(
+  view: PortfolioView,
+  signing?: import("@somnia-chain/markets-sdk").SomniaMarkets,
+): Promise<SweepResult> {
+  const exchange = signing ?? signerExchange();
   if (!exchange) throw new Error("trading is off, so there is no signer to redeem with");
   if (view.claimable.length === 0) {
     return { claimed: 0, positions: 0, txHash: null, error: null };

@@ -1,35 +1,42 @@
-import Vault from "@/components/Vault";
+import RealVaults from "@/components/RealVaults";
+import { Providers } from "./providers";
 
 export default function Page() {
   return (
-    <main className="shell">
-      <nav className="topnav">
-        <span className="topnav-here">the UP vault</span>
-        <a href="/desk">the numbers →</a>
-      </nav>
-      <header className="masthead">
-        <p className="wordmark">Quorum</p>
-        <h1>UP — one token that bets up on every market here.</h1>
-        <p>
-          Deposit once. The vault splits your money across <strong>every live market on the venue</strong> —
-          the same number of contracts of each — and as each window settles, the payout rolls itself into
-          that market&rsquo;s next window. Withdraw whenever you like.
-        </p>
-        <p>
-          It runs on paper money against the real order books: real prices in, real oracle outcomes back.
-          Wondering whether the diversification is real? It is measured, not assumed —{" "}
-          <a href="/desk">the numbers page</a> shows the evidence either way.
-        </p>
-      </header>
+    <Providers>
+      <main className="shell">
+        <nav className="topnav">
+          <span className="topnav-here">the vaults</span>
+          <span>
+            <a href="/paper">paper sandbox</a>&nbsp;&nbsp;·&nbsp;&nbsp;<a href="/desk">the numbers →</a>
+          </span>
+        </nav>
+        <header className="masthead">
+          <p className="wordmark">Quorum</p>
+          <h1>Pick a side. Hold every market at once.</h1>
+          <p>
+            <strong>QUP</strong> bets every live market on the venue closes up; <strong>QDWN</strong>{" "}
+            bets they all close down. Connect a wallet, deposit testnet tUSDC, receive the vault token —
+            the pot buys the same number of contracts of each market and rolls itself window after
+            window. Anyone can join; the tokens are plain ERC-20s and the pot is shared.
+          </p>
+          <p>
+            Shares only ever price while the vault is flat, so the price is an on-chain balance anyone
+            can check — never a posted NAV. Why a basket at all? Because it is measured:{" "}
+            <a href="/desk">the numbers page</a> shows exactly how much diversification these markets do
+            and don&rsquo;t give you.
+          </p>
+        </header>
 
-      <Vault />
+        <RealVaults />
 
-      <footer className="foot">
-        Built on the <a href="https://docs.dreamdex.io/developers/event-contracts">dreamDEX event
-        contracts</a> via <code>@somnia-chain/markets-sdk</code>. Your ledger lives in this browser —
-        no account, no server-side state. The same strategy with a real funded key is{" "}
-        <code>bots/roll-sleeve.ts</code> in the repo.
-      </footer>
-    </main>
+        <footer className="foot">
+          Built on the <a href="https://docs.dreamdex.io/developers/event-contracts">dreamDEX event
+          contracts</a> via <code>@somnia-chain/markets-sdk</code>, on Somnia Shannon. Contracts:{" "}
+          <code>contracts/QuorumVault.sol</code> — deposits and withdrawals price only at flat moments,
+          on-chain. Try the strategy without a wallet in the <a href="/paper">paper sandbox</a>.
+        </footer>
+      </main>
+    </Providers>
   );
 }
