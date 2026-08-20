@@ -321,39 +321,50 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
             <input type="number" min={1} step={1} value={amount}
               onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))} />
           </label>
+          <button className="primary" disabled={busy || amount <= 0}
+            title="the vault mints free testnet collateral to itself and credits your shares"
+            onClick={() =>
+              act(
+                () =>
+                  writeContract({
+                    address: state.address, abi: quorumVaultAbi,
+                    functionName: "depositFree", args: [raw],
+                  }),
+                "depositing…",
+              )
+            }>
+            {state.phase === "OPEN" ? `Deposit ${amount} — one tx, no approval` : `Deposit ${amount} — queues for next settle`}
+          </button>
           {!allowanceKnown ? (
-            <button className="primary" disabled>checking allowance…</button>
+            <button disabled>checking allowance…</button>
           ) : needsApproval ? (
-            <button className="primary" disabled={busy}
+            <button disabled={busy}
+              title="only needed to deposit tUSDC you already hold; the primary button needs no approval at all"
               onClick={() =>
                 act(
                   () =>
                     writeContract({
                       address: TEST_USDC, abi: erc20Abi, functionName: "approve",
-                      // Unlimited, once: every deposit after this is one
-                      // transaction. Testnet collateral, so the usual reason to
-                      // meter approvals does not apply.
                       args: [state.address, maxUint256],
                     }),
                   "approving (one-time)…",
                 )
               }>
-              Approve once, then 1-tx deposits
+              use my own tUSDC (approve once)
             </button>
           ) : (
-            <button className="primary" disabled={busy || amount <= 0}
+            <button disabled={busy || amount <= 0}
               onClick={() =>
                 act(
                   () =>
                     writeContract({
                       address: state.address, abi: quorumVaultAbi,
-                      functionName: state.phase === "OPEN" ? "deposit" : "requestDeposit",
-                      args: [raw],
+                      functionName: "deposit", args: [raw],
                     }),
-                  "depositing…",
+                  "depositing your tUSDC…",
                 )
               }>
-              {depositLabel}
+              use my own tUSDC
             </button>
           )}
           <button disabled={busy || !myShares}
@@ -363,13 +374,12 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
                 () =>
                   writeContract({
                     address: state.address, abi: quorumVaultAbi,
-                    functionName: state.phase === "OPEN" ? "withdraw" : "requestWithdraw",
-                    args: [shares.data!],
+                    functionName: "exit", args: [shares.data!],
                   }),
                 "withdrawing…",
               )
             }>
-            {state.phase === "OPEN" ? "Withdraw all" : "Queue withdrawal"}
+            {state.phase === "OPEN" ? "Withdraw all" : "Withdraw all at next settle"}
           </button>
         </div>
       ) : (

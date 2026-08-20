@@ -40,6 +40,11 @@ interface IERC20 {
     function balanceOf(address account) external view returns (uint256);
 }
 
+/** The Shannon test collateral mints to any caller — contracts included. */
+interface IFaucet {
+    function faucet(uint256 amount) external;
+}
+
 contract QuorumVault {
     // ------------------------------------------------------------- ERC-20
     string public name;
@@ -129,50 +134,67 @@ contract QuorumVault {
     }
 
     // ----------------------------------------------------- holder actions
+    //
+    // One verb each way, whatever the phase: while the vault is flat the
+    // action executes instantly at the exact balance price; while the money is
+    // out working it queues and executes at the next settle's snapshot. The
+    // caller never has to know which — the events say what happened.
 
-    /** Instant deposit at the exact flat price. OPEN only. */
-    function deposit(uint256 assets) external returns (uint256 shares) {
-        if (phase != Phase.OPEN) revert WrongPhase();
+    /** Deposit your own collateral. Requires a one-time ERC-20 approval. */
+    function deposit(uint256 assets) external {
         if (assets == 0) revert ZeroAmount();
-        // Price off the pot as it stands, then pull the assets in.
-        shares = (assets * (totalSupply + VIRTUAL)) / (cash() + VIRTUAL);
-        if (shares == 0) revert ZeroAmount();
         _pull(msg.sender, assets);
-        _mint(msg.sender, shares);
-        emit InstantDeposit(msg.sender, assets, shares);
+        _credit(msg.sender, assets);
     }
 
-    /** Instant withdrawal at the exact flat price. OPEN only. */
-    function withdraw(uint256 shares) external returns (uint256 assets) {
-        if (phase != Phase.OPEN) revert WrongPhase();
+    /**
+     * Deposit in ONE transaction with no approval at all: the vault mints the
+     * test collateral to itself from the token's open faucet and credits the
+     * shares. Only meaningful on a testnet, and only honest because the same
+     * faucet is open to everyone anyway — a depositor with a wallet full of
+     * tUSDC and one with an empty wallet can mint identical positions either
+     * way, so no holder is diluted by anything they could not have done
+     * themselves for free.
+     */
+    function depositFree(uint256 assets) external {
+        if (assets == 0 || assets > 100_000e6) revert ZeroAmount();
+        IFaucet(address(asset)).faucet(assets);
+        _credit(msg.sender, assets);
+    }
+
+    /** Leave. Instant at the flat price, or queued for the next settle. */
+    function exit(uint256 shares) external {
         if (shares == 0) revert ZeroAmount();
-        assets = (shares * (cash() + VIRTUAL)) / (totalSupply + VIRTUAL);
-        _burn(msg.sender, shares);
-        _push(msg.sender, assets);
-        emit InstantWithdraw(msg.sender, shares, assets);
+        if (phase == Phase.OPEN) {
+            uint256 assets = (shares * (cash() + VIRTUAL)) / (totalSupply + VIRTUAL);
+            _burn(msg.sender, shares);
+            _push(msg.sender, assets);
+            emit InstantWithdraw(msg.sender, shares, assets);
+        } else {
+            if (pendingWithdraws.length >= QUEUE_CAP) revert QueueFull();
+            // Escrow the shares in the vault; they burn at settle.
+            _transfer(msg.sender, address(this), shares);
+            pendingWithdraws.push(Pending(msg.sender, uint128(shares)));
+            pendingWithdrawShares += shares;
+            emit WithdrawRequested(msg.sender, epoch, shares);
+        }
     }
 
-    /** Queue a deposit while the money is out working. Prices at the next settle. */
-    function requestDeposit(uint256 assets) external {
-        if (phase != Phase.DEPLOYED) revert WrongPhase();
-        if (assets == 0) revert ZeroAmount();
-        if (pendingDeposits.length >= QUEUE_CAP) revert QueueFull();
-        _pull(msg.sender, assets);
-        pendingDeposits.push(Pending(msg.sender, uint128(assets)));
-        pendingDepositAssets += assets;
-        emit DepositRequested(msg.sender, epoch, assets);
-    }
-
-    /** Queue a withdrawal while the money is out working. Pays at the next settle. */
-    function requestWithdraw(uint256 shares) external {
-        if (phase != Phase.DEPLOYED) revert WrongPhase();
-        if (shares == 0) revert ZeroAmount();
-        if (pendingWithdraws.length >= QUEUE_CAP) revert QueueFull();
-        // Escrow the shares in the vault; they burn at settle.
-        _transfer(msg.sender, address(this), shares);
-        pendingWithdraws.push(Pending(msg.sender, uint128(shares)));
-        pendingWithdrawShares += shares;
-        emit WithdrawRequested(msg.sender, epoch, shares);
+    /** Collateral is in the vault; mint now (flat) or queue for the settle. */
+    function _credit(address account, uint256 assets) internal {
+        if (phase == Phase.OPEN) {
+            // The assets are already in the balance, so price off the pot as
+            // it stood before they arrived.
+            uint256 shares = (assets * (totalSupply + VIRTUAL)) / (cash() - assets + VIRTUAL);
+            if (shares == 0) revert ZeroAmount();
+            _mint(account, shares);
+            emit InstantDeposit(account, assets, shares);
+        } else {
+            if (pendingDeposits.length >= QUEUE_CAP) revert QueueFull();
+            pendingDeposits.push(Pending(account, uint128(assets)));
+            pendingDepositAssets += assets;
+            emit DepositRequested(account, epoch, assets);
+        }
     }
 
     // --------------------------------------------------- operator actions
