@@ -99,8 +99,13 @@ export default function Desk() {
   useEffect(() => {
     if (initialized.current || !snapshot || upLegs.length === 0) return;
     initialized.current = true;
-    const widest = snapshot.templates.find((t) => t.id === "wide");
-    setSelection(new Map((widest?.marketIds ?? upLegs.map((l) => l.marketId)).map((id) => [id, "UP" as Side])));
+    // Open on the four-leg, deep-history basket rather than the widest one: it
+    // is a real cross-section *and* it has enough settled windows to replay,
+    // where anything including a 24h leg has two dozen.
+    const opening =
+      snapshot.templates.find((t) => t.id === "fast-four" && t.marketIds.length >= 3) ??
+      snapshot.templates.find((t) => t.id === "wide");
+    setSelection(new Map((opening?.marketIds ?? upLegs.map((l) => l.marketId)).map((id) => [id, "UP" as Side])));
   }, [snapshot, upLegs]);
 
   const selectionPayload = useMemo(
@@ -492,7 +497,7 @@ export default function Desk() {
                     <th>series</th>
                     <th>settled windows</th>
                     <th>up rate</th>
-                    <th>ρ with its own next window</th>
+                    <th style={{ textTransform: "none" }}>correlation with its own next window</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -523,10 +528,14 @@ export default function Desk() {
               more profit — it is less noise.
               {quote.backtest.driverSeries && (
                 <>
-                  {" "}A complete roll needs every leg to have settled, so the coarsest leg sets the
-                  clock: <span className="series">{quote.backtest.driverSeries.replace("|", " ")}</span>{" "}
-                  here. Mixing a 24h window into a basket of 15m windows buys diversification but costs
-                  you most of the replay — pick a single cadence for the long history.
+                  {" "}A complete roll needs every leg to have settled, so the leg with the least
+                  history sets the clock:{" "}
+                  <span className="series">{quote.backtest.driverSeries.replace("|", " ")}</span>.
+                  {quote.backtest.rolls < 40 && (
+                    <> Only {quote.backtest.rolls} rolls survive that here — a slow cadence has a few
+                    dozen settled windows where a fast one has hundreds, so a basket including one is
+                    barely replayable. Try the four-leg basket for the long history.</>
+                  )}
                 </>
               )}
             </p>

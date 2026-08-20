@@ -24,8 +24,8 @@ Nothing above needs a key, an account, or a funded wallet.
 ## Does it actually work?
 
 An index only reduces risk to the extent its legs disagree, and this venue's entire universe is *BTC
-or ETH, up or down*. So the interesting question is empirical, and it has an answer. Measured over the
-venue's own settled windows:
+or ETH, up or down*. So the interesting question is empirical, and it has an answer. Read off the
+venue's settled windows on 2026-08-20 — `npx tsx bots/census.ts` reprints all of it from live data:
 
 | | measured ρ | windows |
 | --- | --- | --- |

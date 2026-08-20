@@ -98,3 +98,19 @@ test("the liquidity template orders by spread", () => {
   const spreads = picked.map((l) => l.ask! - l.bid!);
   assert.deepEqual(spreads, [...spreads].sort((a, b) => a - b));
 });
+
+test("the fast-four template takes both assets on the two quickest cadences", () => {
+  const deep: Leg[] = [
+    stub("BTC", "15m", 0.51, 0.49),
+    stub("ETH", "15m", 0.52, 0.5),
+    stub("BTC", "1h", 0.6, 0.58),
+    stub("ETH", "1h", 0.61, 0.59),
+    stub("BTC", "24h", 0.7, 0.68),
+    stub("ETH", "24h", 0.71, 0.69),
+  ];
+  const picked = TEMPLATES.find((t) => t.id === "fast-four")!.pick(deep);
+  assert.deepEqual(
+    picked.map((l) => l.series).sort(),
+    ["BTC|15m", "BTC|1h", "ETH|15m", "ETH|1h"],
+  );
+});

@@ -196,7 +196,7 @@ export async function quoteSelection(request: QuoteRequest): Promise<QuoteRespon
     {
       legs: legs.map((l) => ({ series: l.series, weightBp: l.weightBp, side: l.side })),
       assumedEntryPrice: request.assumedEntryPrice ?? 0.5,
-      maxRolls: request.maxRolls ?? 250,
+      maxRolls: request.maxRolls ?? 500,
     },
     history.realizedPrices,
   );

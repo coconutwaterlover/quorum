@@ -22,6 +22,16 @@ const distanceFromEven = (l: Leg) => Math.abs((l.mid ?? 0.5) - 0.5);
 
 export const TEMPLATES: readonly Template[] = [
   {
+    id: "fast-four",
+    name: "The fast four",
+    thesis:
+      "Both assets on the two quickest cadences. Four legs is a real cross-section, and these are the series with hundreds of settled windows behind them — so it is the only basket whose history is deep enough to replay properly.",
+    pick: (legs) => {
+      const quick = quickestIntervals(legs, 2);
+      return legs.filter((l) => tradable(l) && quick.includes(l.interval)).sort(byExpiry);
+    },
+  },
+  {
     id: "wide",
     name: "Everything open",
     thesis:
@@ -67,6 +77,18 @@ export const TEMPLATES: readonly Template[] = [
         .slice(0, 6),
   },
 ];
+
+/**
+ * The `count` quickest cadences that are open. Quick cadences roll often, so
+ * they are also the ones with a long settled history — a 24h series has two
+ * dozen windows behind it where a 15m series has hundreds, and a basket is only
+ * replayable as far back as its thinnest leg.
+ */
+function quickestIntervals(legs: readonly Leg[], count: number): string[] {
+  return [...new Set(legs.filter(tradable).map((l) => l.interval))]
+    .sort((a, b) => intervalSeconds(a) - intervalSeconds(b))
+    .slice(0, count);
+}
 
 function shortestSharedInterval(legs: readonly Leg[]): string | null {
   const assetsByInterval = new Map<string, Set<string>>();
