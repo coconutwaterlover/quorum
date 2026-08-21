@@ -1,92 +1,110 @@
 # Quorum
 
-**Index contracts for [dreamDEX event contracts](https://docs.dreamdex.io/developers/event-contracts).**
-Don't pick a market — pick how many of them have to be right.
+**One token, every market. Two self-driving vaults on
+[dreamDEX event contracts](https://docs.dreamdex.io/developers/event-contracts).**
+Don't pick a market — pick a side: **QUP** bets every live 15-minute market on the venue closes up,
+**QDWN** that they all close down.
 
-**Live on Somnia Shannon** — [QUP `0xf93ed67f…e99a`](https://shannon-explorer.somnia.network/address/0xf93ed67f014d02c4b76da20795b472d241d1e99a)
-and [QDWN `0x1e120df1…7bd2`](https://shannon-explorer.somnia.network/address/0x1e120df1b33aa5c7fcd54f1c9a10aeef7b787bd2),
-holding real (testnet) deposits from real wallets. QUP's first epoch settled at 2.44 — both 15m windows
-closed up — while QDWN's settled at 0.095, the same windows from the other side.
+**Live:** [quorum-somnia-coco.vercel.app](https://quorum-somnia-coco.vercel.app), on Somnia Shannon —
+[QUP `0x1f089ea0…fcd6`](https://shannon-explorer.somnia.network/address/0x1f089ea05b7d0e13d9ebc23ee7233fe94027fcd6),
+[QDWN `0x119e0ebf…40ab`](https://shannon-explorer.somnia.network/address/0x119e0ebff8edd84dc3e1c969e2f9a35cac1640ab),
+kept alive by [the brain `0xb69a86f4…14e8`](https://shannon-explorer.somnia.network/address/0xb69a86f47cbbd0fedd0612208d355261994314e8),
+holding real (testnet) deposits from real wallets.
 
-Three front doors, one engine:
+## What it is
 
-- **The vaults** (`/`) — the real, shared ones: **QUP** bets every live market closes up, **QDWN**
-  that they all close down. Connect a wallet on Somnia Shannon, deposit testnet tUSDC, receive the
-  ERC-20 vault token; the pot buys the same number of contracts of every live 15m window and rolls
-  itself epoch after epoch. Anyone can join — the tokens are plain ERC-20s and the pot is shared.
-- **The paper sandbox** (`/paper`) — the same strategy on a private paper ledger in your browser: no
-  wallet, no gas, instant. Real prices and real oracle outcomes; only the money is pretend.
-- **The numbers** (`/desk`) — the analytical page: books, measured correlations, the payoff ladder,
-  the replay, and the exact orders a basket buy becomes.
+Each vault is a plain ERC-20 (6 decimals) wrapped around a shared pot of testnet tUSDC. Deposit and
+you're minted shares; the pot buys **the same number of contracts of every live 15-minute market**,
+rides the window to resolution, redeems, settles, and buys the next window — epoch after epoch, with
+no server, keeper, or operator in the loop. Withdraw whenever you like.
 
-### Nobody runs it
+- **Deposits are one transaction with no approval**: the Shannon test collateral's faucet is open to
+  contracts too, so `depositFree()` mints the tUSDC to the vault inside your own call. (Plain
+  `deposit()` after an ERC-20 approval also works, for tUSDC you already hold.)
+- **Anyone can join**; the tokens are transferable and the pot is shared.
+- The site is a thin window onto the contracts: live bucket tiles quoted from the pools, a share-price
+  chart drawn only from `EpochSettled` events, and an FAQ that documents every rule below.
 
-The v3 vaults are **self-driving**: each contract holds its own collateral and outcome tokens, reads
-the order books on-chain, places its own IOC orders on the pools, redeems its own winnings through the
-module, and settles its own epochs. What wakes it is the chain itself — `QuorumBrain` holds a 32 STT
-Somnia Reactivity bond and owns two subscriptions: the venue MarketCreator's `MarketCreated` events
-(chain-fed bucket discovery, filtered to the 15m cadence in the handler) and a self-re-arming
-quarter-hour heartbeat that calls the vaults' permissionless `runEpoch()`. The first fully unattended
-cycle was observed by a read-only watcher: windows fed at the boundary, both vaults bought their
-buckets 45 seconds later, brain re-armed itself — zero transactions from anyone.
+## How the pot is divided
 
-Every moving part is permissionless (`runEpoch`, `rearm`, `pokeVaults`), so a dropped callback is
-healable by any EOA; the server keeps only a tiny healer that does exactly that. The brain can say
-*when*, never *where the money goes*.
+Each epoch the vault stakes **`STAKE_BP` = ⅓ of the pot** and keeps the rest in reserve. Never all-in:
+BTC and ETH agree most windows (measured ρ ≈ 0.6), so "the whole bucket lost" is a regular event, and
+an all-in pot multiplies by ~0 every time it happens — the very first live vault went
+1.00 → 2.44 → 4.57 → 0.10 in an hour proving it.
 
-Two venue quirks the build surfaced, for anyone following: **pools and market shells are recycled onto
-the next window within minutes of expiry**, so redemption must be keyed by `marketId` through the
-module — any stored address answers for a different market by settle time. And **a 13KB deploy on
-Somnia genuinely costs ~42M gas** — trust the node's estimate; a hand-pinned "sane" limit is an
-out-of-gas revert that still burns the whole limit.
+The staked third buys **equal contracts, not equal cash** — each market's budget is proportional to
+its price. Equal cash is the seductive wrong vault: a dollar buys 7× more contracts at 0.13 than at
+0.96, so an equal-cash pot is secretly a leveraged bet on whichever market happens to be cheapest.
 
-### How the shared vaults stay fair
+Two guards, both on-chain in `QuorumVaultV3`:
 
-The classic attack on pooled prediction vaults is mark manipulation: depress a thin book's quote just
-before depositing, mint cheap shares, let the market resolve. `QuorumVault` closes the whole class by
-never pricing shares off a mark at all. Shares price only at moments when the vault is **flat** —
-everything sitting as plain collateral at the contract — so the price is `balance / supply`, an
-on-chain fact. Mid-epoch deposits and withdrawals queue and execute at the next settle (minutes, on
-15m windows), priced by one snapshot everyone in the queue shares. The share math also carries the
-OZ-style virtual-liquidity offset, so the first-depositor donation-inflation attack costs more than
-it can recover.
+- **Price band** — a leg asking outside **0.05–0.95** is skipped. Budget ∝ price means a near-decided
+  market eats the most stake for the worst asymmetry: risking 0.97 to win 0.03 is a fee, not a
+  position.
+- **Protective IOC residual** — whatever the pair mint (below) didn't cover is bought
+  immediate-or-cancel at ask + ~3% cushion; anything that doesn't fill at a fair price refunds to the
+  reserve untouched.
 
-The honest trust boundary: the **executor key custodies the pot while deployed** and is trusted to
-return it. Under-returning would be visible on-chain forever as a price drop — visible, not
-prevented. Testnet demonstration, not a custody design. Each epoch stakes a third of the pot, not all of it (`QUORUM_STAKE_FRACTION`): the bucket
-diversifies across markets within a window, but BTC and ETH agree ~60% of the time, so an all-in pot
-multiplies by ~0 every time the whole bucket loses — QUP's first hour live went 1.00 → 2.44 → 4.57 →
-0.10 proving exactly that. Fractional staking is the difference between a track record and a
-martingale. The epoch loop (`redeem → return → settle → deploy → buy`)
-rides on the page's own polling: each `/api/vaults` response schedules one debounced keeper pass
-post-response, so any open tab keeps the vaults rolling (per-minute crons are a paid Vercel feature;
-a daily cron on `/api/keeper` is the dead-man fallback, and hitting it with the `CRON_SECRET` works
-from any external scheduler). Every step is guarded by on-chain phase checks, so overlapping passes
-revert harmlessly instead of double-spending.
+## Pair minting: the vaults trade with each other
 
-A dreamDEX event contract is one Bernoulli draw. Fifteen minutes later it paid 1 or it paid 0, and
-that is the entire distribution. Quorum buys a **slice of every live window at once**: one unit costs
-the average of the leg prices and pays the fraction of legs that win.
+One Up contract plus one Down contract of the same market always pays exactly 1.00, so the venue's
+CLOB mints a fresh pair whenever a Buy-YES and a Buy-NO cross at complementary prices — no seller
+needed. QUP and QDWN want opposite sides of the same markets at the same moment: they are each
+other's perfect counterparty, and paying the public book's spread twice was pure leak.
 
-There is no index token, no vault, and no oracle of its own. A unit *is* its legs, so its NAV is a sum
-over prices already resting on the order book, and buying the legs is creation while selling them is
-redemption. Nothing can trade away from fair value because nobody stands between the two.
+So each window, inside one brain transaction per market:
 
-```
-npm install
-npx tsx bots/census.ts     # read-only: what's live, what it costs, what history says
-npm run dev                # the desk, at localhost:3000
-```
+1. `QUP.pairMake` rests a bid at the spread's midpoint — strictly inside the spread so it can't cross
+   on placement, expiring in 90 s so a failed cross self-cleans (there is no cancel).
+2. `QDWN.pairCross` sends an IOC priced exactly at that bid; price priority guarantees it fills the
+   maker first, and the pool mints the pair at fair value — **zero spread, zero cushion** on the
+   overlapping size (`min` of the two pots' plans).
+3. Each vault's residual entry tops up `target − already-held`, so pair fills — or a third party
+   hitting the maker, which is also a fair-priced fill — shrink it automatically.
 
-Nothing above needs a key, an account, or a funded wallet.
+Execution cost is the one guaranteed loss in the system, paid win or lose every window; pairing
+deletes it wherever the pots overlap. The brain's `pairsMinted` counter is the public receipt, and
+each vault still enforces its own price and budget bounds on every order — the brain sequences, it
+never prices.
 
----
+## How the shared pot stays fair
 
-## Does it actually work?
+The classic attack on pooled prediction vaults is mark manipulation: push a thin book's quote, mint
+cheap shares, let it resolve. Quorum closes the whole class by never pricing shares off a mark.
+Shares price **only at flat moments** — everything sitting as plain collateral — so the price is
+`balance ÷ supply`, an on-chain fact nobody can bend. Mid-epoch deposits and withdrawals queue and
+execute at the next settle (minutes, on 15-minute windows), all paid from one snapshot. The share
+math carries the OZ-style virtual-liquidity offset, so first-depositor donation-inflation costs more
+than it can recover.
 
-An index only reduces risk to the extent its legs disagree, and this venue's entire universe is *BTC
-or ETH, up or down*. So the interesting question is empirical, and it has an answer. Read off the
-venue's settled windows on 2026-08-20 — `npx tsx bots/census.ts` reprints all of it from live data:
+There is no executor, no custody hop, no posted NAV: **the vault holds its own money**, places its
+own orders, redeems its own winnings through the module, and settles its own epochs.
+
+## Nobody runs it
+
+`QuorumBrain` holds a 32 STT Somnia Reactivity bond and owns two subscriptions:
+
+- the venue MarketCreator's `MarketCreated` events — chain-fed bucket discovery, filtered to the
+  15-minute cadence in the handler, forwarded to both vaults' `noteWindow`;
+- a self-re-arming quarter-hour heartbeat that fires 45 s after each boundary and runs the full pass:
+  `redeemAndSettle` both vaults → pair-mint the overlap → residual entries.
+
+Every moving part is permissionless — `runEpoch`, `rearm`, `pokeVaults` — so a dropped callback is
+healable by any EOA. Public `runEpoch()` waits `PAIR_GRACE` = 120 s into a window before entering
+solo, giving the brain first shot at pairing; if the brain dies, the vaults keep rolling the old way.
+The web app keeps only a tiny healer that does exactly what any stranger could
+(`/api/vaults` schedules one debounced pass post-response; a daily cron on `/api/keeper` with
+`CRON_SECRET` is the dead-man fallback).
+
+Verified unattended on Shannon: the first heartbeat after deploy paired both windows (identical
+quantity and price on `PairMade`/`PairCrossed`, mids 0.077/0.089, QDWN's whole target filled with
+zero book residual), the second settled epoch 0 on both vaults at opposite prices (0.722 / 1.028) and
+re-paired epoch 1 — zero external transactions throughout.
+
+## Why a bucket, and why it rolls
+
+An index only reduces risk to the extent its legs disagree, and this venue's universe is *BTC or ETH,
+up or down*. Measured off ~2,300 settled windows (`npx tsx bots/census.ts` reprints it live):
 
 | | measured ρ | windows |
 | --- | --- | --- |
@@ -95,253 +113,125 @@ venue's settled windows on 2026-08-20 — `npx tsx bots/census.ts` reprints all 
 | BTC vs ETH, same 24h window | **0.82** | 23 |
 | BTC 15m vs its own next window | **0.07** | 499 |
 | ETH 15m vs its own next window | **−0.02** | 499 |
-| BTC 4h vs its own next window | **−0.24** | 148 |
 
-Read the two halves separately, because they say opposite things:
+The two halves say opposite things. **Buying more legs at once barely helps** — simultaneous windows
+are worth ~3.3 independent flips, not 7. **Buying the same legs again next window helps a lot** — a
+series barely remembers what it just did. That is the diversification this venue actually offers,
+which is why the product is a *rolling* vault, not a basket bought once. And the honest headline: a
+bucket is a claim about **variance**, never about profit — QUP and QDWN hold opposite sides of the
+same windows, and their charts move opposite ways.
 
-**Buying more legs at once barely helps.** BTC and ETH close the same way most of the time, so seven
-simultaneous windows are worth about **3.3 independent coin flips**, not seven. The app reports that
-number (`effective legs`) rather than the leg count, and shows the independence-assuming bar next to
-the measured one so the gap is visible.
-
-**Buying the same legs again next window helps a lot.** A series barely knows what it did last window.
-That is the diversification this venue actually offers, and it is why the product is a *rolling*
-sleeve rather than a basket you buy once.
-
-Which is also the honest headline: **an index here is a claim about variance, not about profit.** It
-costs one spread per leg and its expected value is the same as any of its legs. What changes is the
-shape of the outcome.
-
----
-
-## What one unit is
-
-A unit is `weightᵢ` **contracts** of each leg. So:
-
-```
-cost of a unit   = Σ wᵢ · priceᵢ          ← a number anyone can recompute from the book
-payoff of a unit = Σ wᵢ · 1{leg i wins}   ← the weighted fraction of legs that won
-```
-
-Because the payoff is *linear* in the legs, a portfolio of the legs is that payoff exactly. That is
-the whole trick, and it is what makes the rest unnecessary — no authorized participants, no
-creation/redemption basket, no NAV to publish, no premium or discount to arbitrage.
-
-It also constrains what the venue can honestly offer. The app prices four payoff shapes off the same
-mids and executes exactly one:
-
-| payoff | fair at measured ρ | if independent | replicable by holding the legs |
-| --- | --- | --- | --- |
-| Average of N | `Σ wᵢpᵢ` | same — linear, so ρ can't move it | **yes** — this is what Quorum buys |
-| Any 1 of N | copula tail | `1 − Π(1−pᵢ)` | no |
-| At least K of N | copula tail | Poisson-binomial tail | no |
-| All N (a parlay) | copula tail | `Π pᵢ` | no |
-
-Thresholds are priced under a one-factor Gaussian copula at the measured mean correlation, with the
-independence number beside them — because independence is not a neutral default here. At ρ ≈ 0.6,
-four even-money legs all win ~23% of the time, not the 6.25% the product rule gives: the naive parlay
-price is off by nearly 4×, in the direction its own correlation panel already disproves. (The tests
-hold the copula to the one thing correlation can never do: move the mean.)
-
-The thresholds are shown because the comparison is the point: the same eight windows are a mild
-diversifier or a lottery ticket depending on nothing but which function of them settles. They would
-need a counterparty or a vault, so this app does not pretend to sell them.
-
-### Sizing is where this goes wrong
-
-Splitting a stake evenly across the legs is the obvious implementation and it silently builds a
-different product. Equal *money* buys many more contracts of a leg priced at 0.13 than one priced at
-0.98, so the payoff ends up dominated by whichever legs happened to be cheap — it is no longer an
-average of anything. Each leg is therefore budgeted in proportion to `weightᵢ × priceᵢ`, which makes
-the contract counts proportional to the weights. You can see it in the plan table: every leg buys the
-same number of contracts.
-
----
-
-## What is on the page
-
-- **The board** — every live window, both sides, with real depth. There is exactly one live window per
-  series; no window *t+1* exists to buy today.
-- **One index unit** — fair value from mids, cost from asks, and the spread between them, because an
-  index buyer crosses every leg and pretending otherwise flatters the product.
-- **The payoff ladder** — a single contract has two bars. This has N+1, and the cost line shows which
-  of them made money.
-- **Risk, measured** — one contract, versus the basket assuming independence, versus the basket at
-  measured correlation, versus the basket rolled.
-- **Settled history** — the correlation matrix, per-series up-rates, and each series' correlation with
-  its own next window.
-- **A replay** — the basket and a single contract over the same settled windows, entered at the same
-  price so their expected values match and only the dispersion differs.
-- **The orders** — exactly what a buy becomes, per leg, before you send it.
-- **Positions and claims** — outcome balances and a batched sweep-redeem.
-
----
-
-## Running it for real
-
-Read-only is the default and does everything except send. To trade:
+## Running it
 
 ```bash
-cp .env.example .env.local
-# QUORUM_ALLOW_TRADING=1
-# QUORUM_PRIVATE_KEY=0x…
-npm run dev
+npm install
+npm test                   # 92 engine tests, pure functions, no chain
+npx tsx bots/census.ts     # read-only: what's live, what it costs, what history says
+npm run dev                # the app at localhost:3000
 ```
 
-Two switches rather than one, on purpose: a key sitting in the environment is not consent to spend it.
-`QUORUM_MAX_STAKE` caps what any single request may commit, which matters on a hosted demo where that
-key is spending for anyone who opens the page.
+The app is read-only by default and needs nothing: with `NEXT_PUBLIC_QUP_ADDRESS`,
+`NEXT_PUBLIC_QDWN_ADDRESS` and `NEXT_PUBLIC_BRAIN_ADDRESS` set it shows the live vaults; visitors
+bring their own wallets. `KEEPER_PRIVATE_KEY` (an ordinary unfunded-with-anything-precious key)
+enables the healer; `CRON_SECRET` gates `/api/keeper`.
 
-Shannon testnet collateral is faucet tUSDC — `exchange.trader.faucet()` mints it.
-
-### The bot
-
-The web app can buy a cross-section; it cannot sit there and roll it, and rolling is where the
-variance actually goes. `bots/roll-sleeve.ts` is the same index as a process you run with your own
-key:
+To deploy your own trio:
 
 ```bash
-QUORUM_PRIVATE_KEY=0x… QUORUM_ALLOW_TRADING=1 \
-QUORUM_SLEEVE=cross-asset QUORUM_STAKE=5 QUORUM_ROLLS=8 \
-  npx tsx bots/roll-sleeve.ts
+DEPLOYER_KEY=0x… node scripts/deploy-v3.mjs
+# deploys QUP + QDWN + brain, seeds both pots, funds the 33 STT bond, arms both subscriptions
 ```
 
-It discovers the live windows, quotes the basket, buys it in contract-proportional legs, sweeps
-whatever settled, waits for the next window, and repeats. Without `QUORUM_ALLOW_TRADING` it prints
-every order it would have sent and sends nothing.
-
----
+Needs ~40 STT: three deploys (a 13KB contract genuinely costs ~50M gas on Somnia — trust the node's
+estimate; a hand-pinned "sane" limit is an out-of-gas revert that still burns the whole limit) plus
+the bond. `scripts/build-abis.mjs` recompiles the contracts into `src/somnia/vaultAbi.ts`.
 
 ## Layout
 
 ```
-src/engine/        pure, no chain, no clock, no I/O — 65 unit tests
-  distribution.ts  exact payoff distribution (weighted convolution) + Poisson-binomial
-  correlation.ts   phi coefficients from settled outcomes, basket sd, effective legs
-  quote.ts         NAV, cost, the four payoff shapes, risk projection
-  backtest.ts      replay a basket against a single contract over settled windows
-  templates.ts     the cross-sections worth holding, each isolating one dependence
-  units.ts         collateral scale conversions (and why prices are never built here)
+contracts/
+  QuorumVaultV3.sol   the vault: ERC-20 shares, flat-moment pricing, queues, the
+                      epoch machine (redeem → settle → pair → enter), band, pair legs
+  QuorumBrain.sol     reactivity hub: MarketCreated feed, quarter-hour heartbeat,
+                      pair-mint orchestration; holds the bond, can never touch money
 
-src/somnia/        everything that touches the chain, server-only
-  exchange.ts      read-only and signing exchanges; the two trading switches
-  discover.ts      live legs — indexer filter, on-chain status gate, expiry headroom
-  history.ts       settled outcomes, paged by facet because there is no offset
-  execute.ts       basket buy: contract-proportional legs, IOC, per-leg reporting
-  portfolio.ts     outcome balances and batched sweep-redeem
-  desk.ts          the composed snapshot every route reads
+src/app/              the site: vault cards, dashboard chart, FAQ, navbar
+  api/vaults          state for the UI + the piggybacked keeper pass
+  api/vaults/history  EpochSettled events via the explorer, one dot per settle
+  api/keeper          the dead-man cron target
 
-bots/census.ts     every number the app is built on, printed from a terminal
-bots/roll-sleeve.ts the rolling index as a bot
+src/somnia/           chain access, server-only
+  vaults.ts           v3 reads, brain receipt, the healer
+  vaultAbi.ts         generated by scripts/build-abis.mjs
+  discover/history/execute/portfolio/exchange
+                      the research + bot toolchain (census, roll-sleeve)
+
+src/engine/           pure maths, no chain, no clock — the 92-test suite
+  distribution/correlation/quote/backtest/templates/units/vault
+
+bots/census.ts        every number the docs claim, printed from live data
+bots/roll-sleeve.ts   the rolling index as a standalone bot with your own key
 ```
-
-`npm test` runs the engine suite. It is all pure functions, so the maths is testable without a chain:
-the distribution's mean must equal `Σ wᵢpᵢ`, eight independent even legs must land at exactly
-`0.5/√8`, perfectly correlated legs must diversify nothing, and an unmeasurable correlation must not
-quietly become independence.
-
----
-
-## Deploying
-
-Zero config on Vercel — import the repo and it builds. Two things worth knowing before you do:
-
-**Leave it read-only unless you mean it.** With no environment variables the deployment discovers
-markets, prices baskets, measures correlations, replays history and shows the exact orders it would
-send. Setting `QUORUM_ALLOW_TRADING=1` and `QUORUM_PRIVATE_KEY` on a *public* URL means that key is
-spending for anyone who opens the page — `QUORUM_MAX_STAKE` is the only thing between them and the
-balance. A public demo wants read-only; a funded key belongs in `bots/roll-sleeve.ts` on your own
-machine.
-
-**Every request is a cold one.** The snapshot cache lives inside one serverless instance, so a fresh
-instance pays the full discovery cost: about a second of concurrent chain reads. That is why the
-per-market reads fan out rather than run in sequence — serially the same work takes 3.8s for eight
-markets, and it used to also wait 1.8s on `loadMarkets()` for symbols that were never displayed.
-Routes set `maxDuration = 60` so a slow RPC round trip degrades into a slow page instead of a 504.
-
----
 
 ## What is verified, and what isn't
 
-Worth being precise about, because a demo that implies more than it proved is worse than one that
-says where the line is.
+**Verified live on Shannon.** The full self-driving loop across multiple epochs with zero external
+transactions: chain-fed window discovery, paired entry (`pairsMinted` on the brain, matching
+`PairMade`/`PairCrossed` on the vaults), IOC residuals, marketId-keyed redemption, flat-moment
+settles paying the queues. One-transaction `depositFree` from a cold wallet; deposit/withdraw driven
+through the real UI with a real wallet; the chart's dots reconcile against `EpochSettled` logs. Plus
+everything the research pages ever verified: discovery, four-sided books, basket pricing, the
+correlation matrix over ~2,300 settled windows.
 
-**Verified against live Shannon data.** Market discovery and the on-chain status gate, four-sided
-books and depth, basket pricing, the correlation matrix and per-series autocorrelations over ~2,300
-settled windows, the replay, order construction, and reading outcome-token balances for a real
-account (tested against the market makers quoting these books — 2,010 contracts across two positions,
-which is what caught a bigint that could not be serialized). The engine has 92 unit tests,
-and `scripts/vault-e2e.ts` drives the deployed contracts through a full live epoch. and the replay's realized sd reduction lands within 1.5 points of what the correlation
-model predicts analytically, which is a real check that the two halves agree.
-
-**Not verified end to end.** `placeOrder` and `redeemMany` have never been sent from this repo.
-Shannon's STT faucet is browser-gated, so there was no funded key to send with. The order parameters
-are built by the SDK's own `quoteBinaryStakeOverBook` and shown in full in the plan table before
-anything is sent, and the revert paths follow the documented contract — but "should work" is not
-"did work", and the first person with a funded key should expect to find something here.
-
-The claimable branch is also unexercised by live data: every market maker on this venue redeems
-promptly, so nothing settled and unclaimed was available to read.
-
----
+**Not verified / honest limits.** Unaudited testnet Solidity throughout. The band and pairing bounds
+are enforced per-order, but the brain's sequencing has only the venue's CLOB semantics as its
+counterparty-safety argument — a venue-side change to matching or pair-mint rules would need a
+re-read. If a market never resolves, `RESOLUTION_GRACE` (2 h) abandons it into the settle rather than
+freezing the vault; the stranded tokens stay claimable by a later pass. And a bucket lowers variance
+— never the direction of the bet.
 
 ## Things that bit us
 
-Worth reading before you build on event contracts, because each of these was a bug here first.
+Worth reading before you build on event contracts; each was a bug here first.
 
-**The indexer keeps dead windows in `Trading`.** A flat `listBinaryMarkets({ status: "Trading" })`
-returned 500 rows of which 8 were live; the rest had expired up to 25 days earlier. `listLiveBinaryMarkets`
-filters `expiry > now` server-side. The on-chain status gate is still needed on top, because status is
-time-derived and the index lags by seconds.
+**Pools and market shells are recycled onto the next window within minutes of expiry.** Any address
+you stored is answering for a *different market* by settle time — the first cut asked the stored
+market `isResolved()` and got the next window's honest "false". Redemption must be keyed by
+`marketId` through the module; try/catch on `redeem` doubles as the readiness check.
 
-**`listBinaryMarkets` has a `limit` but no `offset`.** Paging with an offset returns *the same page*
-again. Six "pages" of history were six copies of one page, and after sorting by expiry each window sat
-next to its own duplicate — which reads as lag-1 correlation of **0.84** instead of the true **0.07**.
-That single artifact reversed the product's central conclusion. History is now collected by narrowing
-on `(asset, intervalSec)` facets, and rows are deduplicated by market id regardless.
+**The indexer keeps dead windows in `Trading`.** `listLiveBinaryMarkets` plus an on-chain status gate,
+always.
 
-**`fillPrice` is always the YES price.** On a Down leg the cost per contract is its complement.
-Reading it as the traded side's own price under-reports spend on every Down fill.
+**`listBinaryMarkets` has a `limit` but no `offset`.** Paging returns the same page again; duplicated
+rows read as lag-1 correlation of 0.84 instead of the true 0.07 — an artifact that reversed the
+product's central conclusion until caught. Collect by `(asset, intervalSec)` facets and dedup by id.
 
-**`getBinaryOrderBook`'s `decimals` option defaults to 6.** It is what the NO side is inverted
-against, so leaving it out silently corrupts every NO price on an 18-decimal venue.
+**`fillPrice` is always the YES price.** A Down leg's cost is the complement.
 
-**Equal cash per market is the seductive wrong vault.** "Split the deposit into equal parts" reads
-as the obvious policy and quietly builds a different product: a dollar buys 7× more contracts at 0.13
-than at 0.96, so an equal-cash vault is a leveraged bet on whichever market happens to be cheapest.
-The first cut of the UP vault shipped exactly this — the activity feed showed 95 contracts of one leg
-against 13 of another — and driving the UI in a browser is what caught it. The vault budgets each
-entry by `nav × askᵢ / Σ asks`, which is the allocation that makes every series hold the same count.
+**`getBinaryOrderBook`'s `decimals` defaults to 6.** Pass it explicitly or every NO price is inverted
+against the wrong scale.
 
-**The slippage cushion has a fixed floor, and it distorts sizing.** `quoteBinaryStakeOverBook` pads
-its protective limit by the larger of 3% and ten ticks — so the pad is 3% on a leg priced at 0.955 and
-**50%** on one priced at 0.020. Escrow is quantity x that padded limit, so budgeting each leg on its
-*ask* under-buys exactly the cheap legs, by up to a third, and the contract counts come out unequal
-even though the allocation formula is right. Production showed `[5.941, 8.649, 8.262, 5.941]` where all
-four should have matched. The ask now only seeds a first pass; the second budgets on what the first was
+**Equal cash per market is the seductive wrong vault.** See "How the pot is divided" — the first UP
+vault shipped it, and 95-vs-13 contract counts in the activity feed are what caught it.
+
+**The SDK's slippage cushion has a fixed floor that distorts sizing.** Budgeting each leg on its ask
+under-buys the cheap legs by up to a third; seed on the ask, re-budget on what the first pass was
 actually charged.
 
-**Escrow is not a price forecast.** `quoteBinaryStakeOverBook` returns `escrow = quantity × the
-protective limit` — a max loss. The expected fill comes from `quoteBinaryOrderOverBook`, which walks
-the same book. Reporting the first as an average price makes every basket look 3% more expensive than
-it is.
+**Order expiry must not outlive the market.** The pool enforces `0 < expireNs ≤ market expiry`; a
+"five minutes from now" order placed four minutes before the close reverts. Every vault order clamps
+to `min(now + TTL, window expiry)`.
 
-**A uniform correlation is not a correlation.** Projecting a dozen rolls with a uniform ρ is only
-valid down to `−1/(n−1)`; a mildly negative measured ρ pushed the implied variance through zero and
-the app reported a **risk-free index**. The projection is a lag-1 band now — the only sequential
-dependence the data supports — because measured lag-2 and lag-4 are indistinguishable from zero.
+**A one-tick spread has nowhere to rest a maker.** `pairMake` requires the tick-snapped mid to sit
+strictly between best bid and best ask, and reverts into the plain IOC path otherwise — resting *at*
+the bid would let time priority hand the cross to a stranger and leave the maker stranded.
 
-**A thin sample will happily set your headline.** A 23-window reading of ρ = −0.57 is noise, and
-averaged naively it dominated six other series and inflated "effective legs" by 50%. Estimates are
-shrunk toward zero by `n/(n+30)` and pooled with `n` as the weight.
-
-**Float prices are rejected on an 18-decimal venue.** `parseUnits((0.05).toFixed(18), 18)` lands three
-wei off the tick grid and the pool answers `InvalidPrice`. Of the ordinary probabilities only 0.25,
-0.5 and 0.75 survive the conversion. A 6-decimal venue never shows it, so testnet looks clean while
-every mainnet order fails — which is why no price in this repo is ever built from a float.
+**Float prices are rejected on an 18-decimal venue.** No price in this repo is ever built from a
+float.
 
 ---
 
-Built with [`@somnia-chain/markets-sdk`](https://www.npmjs.com/package/@somnia-chain/markets-sdk) on
-Somnia. Prices, books, correlations and settled outcomes are read live; the only modelled number
-anywhere is the replay entry price, and it is a labelled slider.
+Built with 🥥 by [coconutwaterlover](https://github.com/coconutwaterlover/quorum), on
+[`@somnia-chain/markets-sdk`](https://www.npmjs.com/package/@somnia-chain/markets-sdk) and Somnia
+Reactivity. Prices, books, correlations and settled outcomes are read live; the only trusted number
+anywhere is `balance ÷ supply`, and the chain computes it.
