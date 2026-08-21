@@ -94,6 +94,7 @@ export interface VaultState {
     readonly address: Address;
     readonly fireCount: number;
     readonly windowsFed: number;
+    readonly pairsMinted: number;
     readonly bondStt: number;
   } | null;
 }
@@ -150,15 +151,17 @@ export async function readVaultState(
   const brainAddr = brainAddress();
   if (brainAddr) {
     try {
-      const [fireCount, windowsFed, bond] = await Promise.all([
+      const [fireCount, windowsFed, pairsMinted, bond] = await Promise.all([
         client.readContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "fireCount" }),
         client.readContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "windowsFed" }),
+        client.readContract({ address: brainAddr, abi: quorumBrainAbi, functionName: "pairsMinted" }),
         client.getBalance({ address: brainAddr }),
       ]);
       brain = {
         address: brainAddr,
         fireCount: Number(fireCount),
         windowsFed: Number(windowsFed),
+        pairsMinted: Number(pairsMinted),
         bondStt: Number(formatUnits(bond, 18)),
       };
     } catch {

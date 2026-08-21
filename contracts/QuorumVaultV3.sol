@@ -23,7 +23,21 @@ pragma solidity 0.8.30;
  * every live window gets the SAME number of contracts (budget per window is
  * proportional to its price — equal cash would be a leveraged bet on whichever
  * market is cheapest). Never all-in: BTC and ETH agree most windows, and an
- * all-in pot multiplies by ~0 every time the whole bucket loses.
+ * all-in pot multiplies by ~0 every time the whole bucket loses. Two refinements:
+ *
+ *   PRICE BAND — a leg asking outside [0.05, 0.95] is skipped. Near-decided
+ *   markets eat the most budget (budget ∝ price) for the worst payoff
+ *   asymmetry: risking 0.97 to win 0.03 is not a bucket position, it's a fee.
+ *
+ *   PAIR MINTING — QUP and QDWN want opposite sides of the same windows at the
+ *   same moment, so for the overlapping size they trade with each other instead
+ *   of the public book: the Up vault rests a bid at the spread's midpoint
+ *   (pairMake), the Down vault crosses it in the same transaction (pairCross),
+ *   and the pool mints the pair for exactly 1.00 total — zero spread, zero
+ *   cushion. Only the brain can sequence the two legs; each leg still enforces
+ *   its own price and budget bounds, and the maker order expires in seconds if
+ *   the cross ever fails, so nothing rests unattended. The IOC residual entry
+ *   then tops up `target − already-held`, so pair fills shrink it automatically.
  */
 
 interface IERC20 {
@@ -141,6 +155,15 @@ contract QuorumVaultV3 {
     uint256 public constant MIN_HEADROOM = 120;
     /** After this long past expiry with no resolution, give up waiting and settle without it. */
     uint256 public constant RESOLUTION_GRACE = 2 hours;
+    /** Skip legs asking outside this band: near-decided markets are all cost, no bucket. */
+    uint256 public constant BAND_LO = 50_000; // 0.05
+    uint256 public constant BAND_HI = 950_000; // 0.95
+    /** Public runEpoch waits this long into a window before entering solo, so the
+     *  brain (firing at boundary+45s) gets first shot at pair-minting the overlap. */
+    uint256 public constant PAIR_GRACE = 120;
+    /** A resting pair-maker order lives this long: enough for the same-tx cross,
+     *  short enough to self-clean if the cross ever fails (there is no cancel). */
+    uint256 public constant PAIR_ORDER_TTL = 90;
     uint256 private constant VIRTUAL = 1e6;
     uint256 private constant PRICE_ONE = 1e18;
     uint256 private constant ONE = 1e6; // collateral scale
@@ -154,11 +177,17 @@ contract QuorumVaultV3 {
     event EntrySkipped(bytes32 indexed marketId, bytes reason);
     event WindowRedeemed(bytes32 indexed marketId, uint256 paid);
     event EpochSettled(uint64 indexed epoch_, uint256 price, uint256 cash, uint256 supply);
+    event PairMade(bytes32 indexed marketId, uint256 quantity, uint256 yesMid);
+    event PairCrossed(bytes32 indexed marketId, uint256 quantity, uint256 yesBid);
 
     error NotOwner();
     error NotBrain();
     error ZeroAmount();
     error QueueFull();
+    error WrongSide();
+    error NoWindow();
+    error PairNoRoom();
+    error OverBudget();
 
     constructor(IERC20 asset_, IBinaryModule module_, IERC6909 outcomeToken_, bool isUp_, string memory name_, string memory symbol_) {
         asset = asset_;
@@ -287,11 +316,25 @@ contract QuorumVaultV3 {
      * One pass of the machine, callable by anyone at any time:
      * redeem what resolved -> if flat again, settle the epoch -> enter what is
      * live. Each stage guards itself, so calling this too often is merely gas.
+     * Solo entry waits PAIR_GRACE into each window (the brain pairs first);
+     * the brain and owner bypass the wait.
      */
     function runEpoch() external {
         _redeemResolved();
         _maybeSettle();
-        _maybeEnter();
+        _maybeEnter(msg.sender == brain || msg.sender == owner);
+    }
+
+    /** The first two stages alone — the brain runs this, pairs, then enterNow. */
+    function redeemAndSettle() external {
+        _redeemResolved();
+        _maybeSettle();
+    }
+
+    /** Residual entry with no grace wait. Brain-only: it just finished pairing. */
+    function enterNow() external {
+        if (msg.sender != brain && msg.sender != owner) revert NotBrain();
+        _maybeEnter(true);
     }
 
     function _redeemResolved() internal {
@@ -363,44 +406,84 @@ contract QuorumVaultV3 {
         emit EpochSettled(epoch, price, pot, totalSupply);
     }
 
-    /** Enter every live, unentered window with the same contract count each. */
-    function _maybeEnter() internal {
-        if (phase != Phase.OPEN) return;
-        _prune();
+    /**
+     * The entry plan both entry and the brain's pairing share: which live,
+     * unentered, in-band windows would we buy, and how many contracts of each?
+     * Equal contracts: the shared count is stake / sum(protective prices).
+     */
+    function _plan() internal view returns (uint256[] memory asks, uint256 contractsE6) {
+        asks = new uint256[](windows.length);
+        if (phase != Phase.OPEN) return (asks, 0);
 
-        // First pass: which windows are live, and what does our side cost?
-        uint256 liveCount;
-        uint256[] memory asks = new uint256[](windows.length);
+        uint256 protectiveSum;
         for (uint256 i = 0; i < windows.length; i++) {
             Window storage w = windows[i];
             if (w.entered) continue;
             if (block.timestamp < w.tradingStart || block.timestamp + MIN_HEADROOM >= w.expiry) continue;
             uint256 ask = _ownAsk(w.pool);
-            if (ask == 0 || ask >= ONE) continue;
+            if (ask < BAND_LO || ask > BAND_HI) continue; // covers the empty-book 0 too
             asks[i] = ask;
-            liveCount++;
+            protectiveSum += _protective(ask);
         }
-        if (liveCount == 0) return;
+        if (protectiveSum == 0) return (asks, 0);
 
         uint256 stake = (cash() * STAKE_BP) / 10_000;
-        if (stake < ONE) return;
+        if (stake < ONE) return (asks, 0);
+        contractsE6 = (stake * ONE) / protectiveSum;
+    }
 
-        // Equal contracts: the shared count is stake / sum(protective prices).
-        uint256 protectiveSum;
+    /** The brain's pairing input: how many contracts of each leg we want now. */
+    function plannedContracts() external view returns (uint256) {
+        (, uint256 contractsE6) = _plan();
+        return contractsE6;
+    }
+
+    /** The windows a paired entry could target right now. */
+    function liveUnentered() external view returns (bytes32[] memory ids) {
+        uint256 n;
         for (uint256 i = 0; i < windows.length; i++) {
-            if (asks[i] != 0) protectiveSum += _protective(asks[i]);
+            if (_isLive(windows[i])) n++;
         }
-        if (protectiveSum == 0) return;
-        uint256 contractsE6 = (stake * ONE) / protectiveSum;
+        ids = new bytes32[](n);
+        uint256 j;
+        for (uint256 i = 0; i < windows.length; i++) {
+            if (_isLive(windows[i])) ids[j++] = windows[i].marketId;
+        }
+    }
+
+    function _isLive(Window storage w) internal view returns (bool) {
+        return !w.entered && block.timestamp >= w.tradingStart && block.timestamp + MIN_HEADROOM < w.expiry;
+    }
+
+    /** Enter every live, unentered window up to the shared contract count each. */
+    function _maybeEnter(bool bypassGrace) internal {
+        if (phase != Phase.OPEN) return;
+        _prune();
+
+        (uint256[] memory asks, uint256 contractsE6) = _plan();
+        if (contractsE6 == 0) return;
 
         bool enteredAny;
         for (uint256 i = 0; i < windows.length; i++) {
             if (asks[i] == 0) continue;
             Window storage w = windows[i];
+            if (!bypassGrace && block.timestamp < uint256(w.tradingStart) + PAIR_GRACE) continue;
             uint256 protective = _protective(asks[i]);
             IBinaryPool.BookParams memory params = IBinaryPool(w.pool).getOrderBookParameters();
-            uint256 quantity = (contractsE6 / params.lotSize) * params.lotSize;
-            if (quantity < params.minQuantity || quantity == 0) continue;
+            // Top up to the target: contracts already held (pair fills, or a
+            // maker order someone else hit) shrink the residual automatically.
+            uint256 held = outcomeToken.balanceOf(address(this), isUp ? w.yesId : w.noId);
+            uint256 want = contractsE6 > held ? contractsE6 - held : 0;
+            uint256 quantity = (want / params.lotSize) * params.lotSize;
+            if (quantity < params.minQuantity || quantity == 0) {
+                if (held > 0) {
+                    // The pair already bought this leg; it is a position, not a skip.
+                    w.entered = true;
+                    enteredAny = true;
+                    emit WindowEntered(w.marketId, 0, 0);
+                }
+                continue;
+            }
             // YES-terms limit: our side's protective price, complemented for Down.
             uint256 yesLimit = isUp ? protective : ONE - protective;
             yesLimit = (yesLimit / params.tickSize) * params.tickSize;
@@ -434,6 +517,104 @@ contract QuorumVaultV3 {
             }
         }
         if (enteredAny) phase = Phase.DEPLOYED;
+    }
+
+    // -------------------------------------------------------- pair minting
+
+    /**
+     * The Up vault's half of a pair mint: rest a bid at the spread's midpoint,
+     * strictly inside the spread so it cannot cross on placement. The Down
+     * vault's pairCross hits it in the same transaction and the pool mints the
+     * pair for exactly 1.00 total. If the cross ever fails the order simply
+     * expires in PAIR_ORDER_TTL seconds — and a third party filling it first is
+     * no loss either: contracts at mid beat the IOC path's ask-plus-cushion.
+     */
+    function pairMake(bytes32 marketId, uint256 quantity) external {
+        if (msg.sender != brain && msg.sender != owner) revert NotBrain();
+        if (!isUp) revert WrongSide();
+        Window storage w = _liveWindow(marketId);
+
+        IBinaryPool.Level[] memory bids = IBinaryPool(w.pool).getBookLevels(true, 1);
+        IBinaryPool.Level[] memory asks = IBinaryPool(w.pool).getBookLevels(false, 1);
+        if (bids.length == 0 || asks.length == 0) revert PairNoRoom();
+        uint256 ask = asks[0].price;
+        if (ask < BAND_LO || ask > BAND_HI) revert PairNoRoom();
+
+        IBinaryPool.BookParams memory params = IBinaryPool(w.pool).getOrderBookParameters();
+        uint256 mid = (((bids[0].price + ask) / 2) / params.tickSize) * params.tickSize;
+        if (mid <= bids[0].price) mid += params.tickSize;
+        if (mid >= ask) revert PairNoRoom(); // one-tick spread: nowhere to rest
+
+        quantity = (quantity / params.lotSize) * params.lotSize;
+        if (quantity < params.minQuantity || quantity == 0) revert PairNoRoom();
+        if ((quantity * mid) / ONE > (cash() * STAKE_BP) / 10_000) revert OverBudget();
+
+        _ensureAllowance(w.pool);
+        uint256 orderExpiry = block.timestamp + PAIR_ORDER_TTL;
+        if (orderExpiry > w.expiry) orderExpiry = w.expiry;
+        IBinaryPool(w.pool).placeBinaryOrder(
+            0, // BUY_YES
+            mid,
+            quantity,
+            uint64(orderExpiry * 1e9),
+            0, // limit: REST at mid — the whole point
+            0,
+            address(0),
+            0,
+            uint64(epoch)
+        );
+        emit PairMade(marketId, quantity, mid);
+    }
+
+    /**
+     * The Down vault's half: an IOC buy of NO priced exactly at the best YES
+     * bid — which, one call after pairMake, is the Up vault's resting mid, and
+     * price priority guarantees we fill it first. Cost per contract is
+     * 1 - mid: fair value, no spread, no cushion.
+     */
+    function pairCross(bytes32 marketId, uint256 quantity) external {
+        if (msg.sender != brain && msg.sender != owner) revert NotBrain();
+        if (isUp) revert WrongSide();
+        Window storage w = _liveWindow(marketId);
+
+        IBinaryPool.Level[] memory bids = IBinaryPool(w.pool).getBookLevels(true, 1);
+        if (bids.length == 0) revert PairNoRoom();
+        uint256 bid = bids[0].price;
+        uint256 ownPrice = ONE - bid;
+        if (ownPrice < BAND_LO || ownPrice > BAND_HI) revert PairNoRoom();
+
+        IBinaryPool.BookParams memory params = IBinaryPool(w.pool).getOrderBookParameters();
+        quantity = (quantity / params.lotSize) * params.lotSize;
+        if (quantity < params.minQuantity || quantity == 0) revert PairNoRoom();
+        if ((quantity * ownPrice) / ONE > (cash() * STAKE_BP) / 10_000) revert OverBudget();
+
+        _ensureAllowance(w.pool);
+        uint256 orderExpiry = block.timestamp + PAIR_ORDER_TTL;
+        if (orderExpiry > w.expiry) orderExpiry = w.expiry;
+        IBinaryPool(w.pool).placeBinaryOrder(
+            2, // BUY_NO
+            bid, // YES-terms limit: cross every bid at or above the maker's mid
+            quantity,
+            uint64(orderExpiry * 1e9),
+            2, // IOC — nothing rests on this side
+            0,
+            address(0),
+            0,
+            uint64(epoch)
+        );
+        emit PairCrossed(marketId, quantity, bid);
+    }
+
+    function _liveWindow(bytes32 marketId) internal view returns (Window storage w) {
+        if (phase != Phase.OPEN) revert NoWindow();
+        for (uint256 i = 0; i < windows.length; i++) {
+            if (windows[i].marketId == marketId) {
+                w = windows[i];
+                if (!_isLive(w)) revert NoWindow();
+                return w;
+            }
+        }
+        revert NoWindow();
     }
 
     /** Top of our side's ask, in OUR side's terms (Down asks are 1 - yes bid). */

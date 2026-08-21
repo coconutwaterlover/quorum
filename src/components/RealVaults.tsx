@@ -60,6 +60,7 @@ interface BrainApi {
   address: Address;
   fireCount: number;
   windowsFed: number;
+  pairsMinted: number;
   bondStt: number;
 }
 interface VaultStateApi {
@@ -558,9 +559,9 @@ function FaqModal({ brain, onClose }: { brain: BrainApi | null; onClose: () => v
       q: "What am I actually buying?",
       a: (
         <>A share of a pot that holds <b>the same number of contracts of every live 15-minute market</b> on
-        the venue — QUP betting each closes up, QDWN betting each closes down. Equal contracts is the whole
-        design: equal <em>cash</em> would buy 7× more of a cheap market and quietly turn the bucket into a
-        bet on whichever market happens to be a longshot.</>
+        the venue that isn&rsquo;t already decided — QUP betting each closes up, QDWN betting each closes
+        down. Equal contracts is the whole design: equal <em>cash</em> would buy 7× more of a cheap market
+        and quietly turn the bucket into a bet on whichever market happens to be a longshot.</>
       ),
     },
     {
@@ -584,9 +585,25 @@ function FaqModal({ brain, onClose }: { brain: BrainApi | null; onClose: () => v
         market</b>, so each market&rsquo;s budget is proportional to its price. Example: pot 300 tUSDC →
         stake 100; three markets ask 0.60, 0.30 and 0.10 per contract (sum 1.00) → the vault buys{" "}
         <b>100 contracts of each</b>, spending 60, 30 and 10. Every winning contract redeems for exactly
-        1.00, every losing one for 0. Orders carry a small protective cushion (~3%) and are
-        immediate-or-cancel, so anything that doesn&rsquo;t fill at a fair price returns to the reserve
-        untouched.</>
+        1.00, every losing one for 0. Two guards: a market already trading outside <b>0.05–0.95</b> is
+        skipped — risking 0.97 to win 0.03 is a fee, not a position — and anything that doesn&rsquo;t fill
+        at a fair price (orders carry a ~3% cushion and are immediate-or-cancel) returns to the reserve
+        untouched. And before touching the public book at all, the two vaults trade the overlap with each
+        other at fair value — see the next question.</>
+      ),
+    },
+    {
+      q: "How do QUP and QDWN trade with each other?",
+      a: (
+        <>By <b>pair minting</b>. One Up contract plus one Down contract of the same market always pays
+        exactly 1.00 total, so when a buyer of Up at 0.60 meets a buyer of Down at 0.40, the exchange
+        doesn&rsquo;t need a seller — it locks the combined 1.00 and mints a fresh pair. QUP and QDWN want
+        opposite sides of the same markets at the same moment, so each window the brain has them meet: the
+        Up vault rests a bid at the spread&rsquo;s midpoint, the Down vault crosses it in the very same
+        transaction, and the pair mints at fair value — <b>zero spread, zero cushion</b> on the overlapping
+        size. Only the leftover (the two pots are different sizes) goes to the public order book the normal
+        way. Execution cost is the one guaranteed loss in the whole system, paid win or lose every window;
+        pairing deletes it wherever the two pots overlap.</>
       ),
     },
     {
@@ -652,17 +669,18 @@ function FaqModal({ brain, onClose }: { brain: BrainApi | null; onClose: () => v
       a: (
         <>Nobody. Each vault holds its own money, reads the books on-chain, places its own orders, redeems
         its own winnings, and settles its own epochs. A small on-chain brain — holding a Somnia Reactivity
-        bond — receives the venue&rsquo;s market-creation events and fires a self-re-arming heartbeat every
-        window; it can say <em>when</em>, never where the money goes. Every part is permissionless, so a
-        dropped callback can be healed by anyone.
+        bond — receives the venue&rsquo;s market-creation events, fires a self-re-arming heartbeat every
+        window, and sequences the two vaults&rsquo; pair mint; it can say <em>when</em>, never where the
+        money goes — each vault enforces its own price and budget bounds on every order, the brain&rsquo;s
+        included. Every part is permissionless, so a dropped callback can be healed by anyone.
         {brain && (
           <>
             {" "}Receipt:{" "}
             <a href={`https://shannon-explorer.somnia.network/address/${brain.address}`} target="_blank" rel="noreferrer">
               the brain
             </a>{" "}
-            has fired {brain.fireCount} heartbeats, fed {brain.windowsFed} windows, and holds{" "}
-            {brain.bondStt.toFixed(1)} STT of bond.
+            has fired {brain.fireCount} heartbeats, fed {brain.windowsFed} windows, minted{" "}
+            {brain.pairsMinted} pairs, and holds {brain.bondStt.toFixed(1)} STT of bond.
           </>
         )}
         {" "}The honest limits: unaudited testnet Solidity, and a bucket lowers variance — never the

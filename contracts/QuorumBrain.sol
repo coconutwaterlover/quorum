@@ -15,6 +15,12 @@ interface IQuorumVault {
         uint64 expiry
     ) external;
     function runEpoch() external;
+    function redeemAndSettle() external;
+    function enterNow() external;
+    function plannedContracts() external view returns (uint256);
+    function liveUnentered() external view returns (bytes32[] memory);
+    function pairMake(bytes32 marketId, uint256 quantity) external;
+    function pairCross(bytes32 marketId, uint256 quantity) external;
 }
 
 /**
@@ -59,6 +65,7 @@ contract QuorumBrain is SomniaEventHandler {
     uint256 public armedForMs;
     uint256 public fireCount;
     uint256 public windowsFed;
+    uint256 public pairsMinted;
 
     event Armed(uint256 indexed scheduleId, uint256 timestampMs);
     event EventsArmed(uint256 indexed subscriptionId);
@@ -130,10 +137,53 @@ contract QuorumBrain is SomniaEventHandler {
         return scheduleSubscriptionId;
     }
 
-    /** Run both vaults' machines now. Permissionless — reverts never propagate. */
+    /**
+     * Run both vaults' machines now. Permissionless — reverts never propagate.
+     * Order matters: settle both, pair-mint the overlap (Up rests at mid, Down
+     * crosses it in this same transaction — zero spread on that size), then let
+     * each vault's residual IOC entry top up whatever the pair didn't cover.
+     */
     function pokeVaults() public {
-        try up.runEpoch() {} catch {}
-        try down.runEpoch() {} catch {}
+        try up.redeemAndSettle() {} catch {}
+        try down.redeemAndSettle() {} catch {}
+        _pairAll();
+        try up.enterNow() {} catch {}
+        try down.enterNow() {} catch {}
+    }
+
+    function _pairAll() internal {
+        uint256 wantUp;
+        uint256 wantDown;
+        try up.plannedContracts() returns (uint256 v) {
+            wantUp = v;
+        } catch {
+            return;
+        }
+        try down.plannedContracts() returns (uint256 v) {
+            wantDown = v;
+        } catch {
+            return;
+        }
+        uint256 overlap = wantUp < wantDown ? wantUp : wantDown;
+        if (overlap == 0) return;
+
+        bytes32[] memory markets;
+        try up.liveUnentered() returns (bytes32[] memory m) {
+            markets = m;
+        } catch {
+            return;
+        }
+        for (uint256 i = 0; i < markets.length; i++) {
+            // A failed make leaves nothing behind; a failed cross leaves a
+            // fair-priced maker order that expires on its own within seconds.
+            try up.pairMake(markets[i], overlap) {
+                try down.pairCross(markets[i], overlap) {
+                    unchecked {
+                        pairsMinted += 1;
+                    }
+                } catch {}
+            } catch {}
+        }
     }
 
     function _onEvent(address emitter, bytes32[] calldata eventTopics, bytes calldata data) internal override {
