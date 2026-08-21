@@ -34,7 +34,7 @@ a:hover { text-decoration: underline; }
 .shell { max-width: 1140px; margin: 0 auto; padding: 40px 22px 96px; }
 
 /* ---------------------------------------------------------------- masthead */
-.masthead { border-bottom: 1px solid var(--line); padding-bottom: 26px; margin-bottom: 28px; }
+.masthead { padding: 6px 0 8px; margin-bottom: 20px; }
 .wordmark {
   font-size: 13px; letter-spacing: 0.34em; text-transform: uppercase;
   color: var(--accent); font-weight: 600; margin: 0 0 14px;
@@ -183,3 +183,19 @@ details.faq summary::after { content: "+"; color: var(--accent); font-family: va
 details.faq[open] summary::after { content: "–"; }
 details.faq p { color: var(--muted); margin: 10px 0 2px; max-width: 84ch; }
 details.faq p b, details.faq p code { color: var(--text); }
+
+/* ------------------------------------------------------------------- navbar */
+.navbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-bottom: 1px solid var(--line); padding-bottom: 14px; margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+.navbar-brand {
+  font-family: var(--mono); font-size: 15px; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--accent); margin: 0;
+}
+.navbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* -------------------------------------------------------------- wide modals */
+.modal.modal-wide { max-width: 700px; width: min(700px, 92vw); }
+.modal-scroll { max-height: min(62vh, 560px); overflow-y: auto; padding-right: 6px; }

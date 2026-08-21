@@ -1,19 +1,18 @@
 "use client";
 
 /**
- * The shared vaults: pick a side, connect a wallet, deposit real (testnet)
- * collateral, hold QUP or QDWN.
+ * The whole app: two self-driving vaults, one screen.
  *
- * Anyone can participate — the tokens are plain ERC-20s and the pot is shared.
- * The UI leans on the contract's one big promise: shares only ever price while
- * the vault is flat, so both action paths exist. While OPEN the deposit is
- * instant at the on-chain balance price; while DEPLOYED it queues and mints at
- * the next settle, minutes away on 15m windows. Both are shown as what they
- * are rather than blurred into one button.
+ * Layout doctrine, after a few rounds of user feedback: the buckets and the
+ * numbers carry the story, prose does not. Everything explanatory lives behind
+ * the FAQ in the navbar; the page itself holds one sentence per card. One
+ * deposit button (the no-approval faucet path — the "use my own tUSDC" path
+ * still exists on the contract and in the FAQ, but a second button was noise),
+ * one withdraw button, both phase-aware.
  */
 
-import { useEffect, useMemo, useState } from "react";
-import { formatUnits, maxUint256, parseUnits, type Address } from "viem";
+import { useEffect, useState } from "react";
+import { formatUnits, parseUnits, type Address } from "viem";
 import {
   useAccount,
   useConnect,
@@ -23,16 +22,13 @@ import {
   useWaitForTransactionReceipt,
   useWriteContract,
 } from "wagmi";
-import { quorumVaultV3Abi as quorumVaultAbi } from "@/somnia/vaultAbi";
+import { quorumVaultV3Abi as vaultAbi } from "@/somnia/vaultAbi";
 import { shannon } from "@/app/providers";
 
 const TEST_USDC = "0x70a86D8842FB63C4Ad2b7cdddF530eBf1BB25d8E" as Address;
-const ONE = 1_000_000n; // 6-decimal collateral and shares
 
 const erc20Abi = [
   { name: "balanceOf", type: "function", stateMutability: "view", inputs: [{ type: "address", name: "a" }], outputs: [{ type: "uint256" }] },
-  { name: "allowance", type: "function", stateMutability: "view", inputs: [{ type: "address", name: "o" }, { type: "address", name: "s" }], outputs: [{ type: "uint256" }] },
-  { name: "approve", type: "function", stateMutability: "nonpayable", inputs: [{ type: "address", name: "s" }, { type: "uint256", name: "v" }], outputs: [{ type: "bool" }] },
   { name: "faucet", type: "function", stateMutability: "nonpayable", inputs: [{ type: "uint256", name: "amount" }], outputs: [] },
 ] as const;
 
@@ -46,7 +42,6 @@ interface HistoryApi {
   up: HistoryPoint[];
   down: HistoryPoint[];
 }
-
 interface VaultsApi {
   up: VaultStateApi | { error: string } | null;
   down: VaultStateApi | { error: string } | null;
@@ -61,6 +56,12 @@ interface BucketMarket {
   question: string;
   held: number | null;
 }
+interface BrainApi {
+  address: Address;
+  fireCount: number;
+  windowsFed: number;
+  bondStt: number;
+}
 interface VaultStateApi {
   symbol: "QUP" | "QDWN";
   side: "UP" | "DOWN";
@@ -74,12 +75,7 @@ interface VaultStateApi {
   pendingDeposits: number;
   pendingWithdraws: number;
   bucket: BucketMarket[];
-  brain: {
-    address: Address;
-    fireCount: number;
-    windowsFed: number;
-    bondStt: number;
-  } | null;
+  brain: BrainApi | null;
 }
 
 const num = (v: number | null | undefined, d = 4) => (v === null || v === undefined ? "—" : v.toFixed(d));
@@ -93,6 +89,7 @@ export default function RealVaults() {
   const [history, setHistory] = useState<HistoryApi | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(false);
+  const [showFaq, setShowFaq] = useState(false);
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
 
   useEffect(() => {
@@ -101,8 +98,6 @@ export default function RealVaults() {
   }, []);
 
   useEffect(() => {
-    // First visit gets the explainer; after that it hides behind the “what is
-    // this?” chip. localStorage only exists client-side, hence the effect.
     if (!localStorage.getItem("quorum-intro-seen")) setShowIntro(true);
   }, []);
 
@@ -152,8 +147,8 @@ export default function RealVaults() {
   const wrongChain = isConnected && chainId !== shannon.id;
   const up = vaults?.up && !("error" in vaults.up) ? vaults.up : null;
   const down = vaults?.down && !("error" in vaults.down) ? vaults.down : null;
-  const unconfigured = vaults !== null && !up && !down;
   const wallet = wrongChain ? undefined : address;
+  const brain = up?.brain ?? down?.brain ?? null;
 
   const dismissIntro = () => {
     localStorage.setItem("quorum-intro-seen", "1");
@@ -163,81 +158,75 @@ export default function RealVaults() {
   return (
     <>
       {showIntro && <IntroModal onClose={dismissIntro} />}
-      <div className="chips">
-        <span className="chip live">Somnia Shannon · real wallets, shared vaults, testnet collateral</span>
-        <button className="tiny" onClick={() => setShowIntro(true)}>what is this?</button>
-        {isConnected && address ? (
-          <>
-            <span className="chip">{address.slice(0, 6)}…{address.slice(-4)}</span>
-            {wrongChain ? (
+      {showFaq && <FaqModal brain={brain} onClose={() => setShowFaq(false)} />}
+
+      <nav className="navbar">
+        <span className="navbar-brand">Quorum</span>
+        <span className="navbar-right">
+          <span className="chip live">Somnia Shannon</span>
+          <button className="tiny" onClick={() => setShowFaq(true)}>FAQ</button>
+          <FaucetButton wallet={wallet} />
+          {isConnected && address ? (
+            wrongChain ? (
               <button className="tiny on" onClick={() => switchChain({ chainId: shannon.id })}>
                 switch to Shannon
               </button>
-            ) : null}
-            <button className="tiny" onClick={() => disconnect()}>disconnect</button>
-          </>
-        ) : (
-          <button className="tiny on" disabled={connecting}
-            onClick={() => connectors[0] && connect({ connector: connectors[0] })}>
-            {connecting ? "connecting…" : "connect wallet"}
-          </button>
-        )}
-      </div>
+            ) : (
+              <button className="tiny" title="click to disconnect" onClick={() => disconnect()}>
+                {address.slice(0, 6)}…{address.slice(-4)} ✕
+              </button>
+            )
+          ) : (
+            <button className="tiny on" disabled={connecting}
+              onClick={() => connectors[0] && connect({ connector: connectors[0] })}>
+              {connecting ? "connecting…" : "connect wallet"}
+            </button>
+          )}
+        </span>
+      </nav>
+
+      <header className="masthead">
+        <h1>Pick a side. Hold every market at once.</h1>
+        <p>
+          <strong>QUP</strong> bets every live 15-minute market closes up, <strong>QDWN</strong> that
+          they all close down — one deposit, one token, a shared pot that trades itself.
+        </p>
+      </header>
 
       {apiError && <p className="error">{apiError}</p>}
-      {unconfigured && (
-        <section className="panel">
-          <h2>Not deployed yet</h2>
-          <p className="lede">
-            The QUP/QDWN contracts are not configured on this deployment — set{" "}
-            <code>NEXT_PUBLIC_QUP_ADDRESS</code> / <code>NEXT_PUBLIC_QDWN_ADDRESS</code>.
-          </p>
-        </section>
-      )}
 
       <div className="grid-2">
         {up && <VaultCard state={up} wallet={wallet} now={now} />}
         {down && <VaultCard state={down} wallet={wallet} now={now} />}
       </div>
 
-      {(up || down) && (
-        <Dashboard up={up} down={down} history={history} wallet={wallet} />
-      )}
-
-      {(up || down) && <GetCollateral wallet={wallet} />}
-
-      <section className="panel">
-        <h2>Nobody runs this</h2>
-        <p className="lede">
-          The vaults trade for themselves: each contract holds its own money, reads the order books
-          on-chain, places its own orders, redeems its own winnings, and settles its own epochs. What
-          wakes it is <em>the chain</em> — a small on-chain brain holds a Somnia Reactivity bond, gets
-          the venue&rsquo;s own market-creation events pushed into it, and fires a self-re-arming
-          heartbeat every window. No server, no keeper, no operator custodying anything. Every moving
-          part is permissionless, so if a callback were ever dropped, anyone could nudge the machine —
-          nudge, not control.
-        </p>
-        {(up?.brain ?? down?.brain) && (
-          <p className="note">
-            The brain at{" "}
-            <a href={`https://shannon-explorer.somnia.network/address/${(up?.brain ?? down?.brain)!.address}`}
-              target="_blank" rel="noreferrer">
-              {(up?.brain ?? down?.brain)!.address.slice(0, 10)}…
-            </a>{" "}
-            has fired {(up?.brain ?? down?.brain)!.fireCount} heartbeat(s), fed{" "}
-            {(up?.brain ?? down?.brain)!.windowsFed} market window(s), and holds{" "}
-            {(up?.brain ?? down?.brain)!.bondStt.toFixed(1)} STT of bond — the receipt that nothing
-            else is running.
-          </p>
-        )}
-        <p className="callout warn">
-          <strong>The honest limits.</strong> Testnet, unaudited Solidity, free faucet collateral. And
-          QUP is still a bet that markets close up — the bucket lowers the noise, never the direction.
-        </p>
-      </section>
-
-      <Faq />
+      {(up || down) && <Dashboard up={up} down={down} history={history} wallet={wallet} />}
     </>
+  );
+}
+
+/** Mint free test collateral, straight from the navbar. */
+function FaucetButton({ wallet }: { wallet?: Address }) {
+  const { writeContract, data: txHash, isPending } = useWriteContract();
+  const receipt = useWaitForTransactionReceipt({ hash: txHash });
+  const balance = useReadContract({
+    address: TEST_USDC,
+    abi: erc20Abi,
+    functionName: "balanceOf",
+    args: wallet ? [wallet] : undefined,
+    query: { enabled: !!wallet, refetchInterval: 15_000 },
+  });
+  const busy = isPending || receipt.isLoading;
+  return (
+    <button className="tiny" disabled={!wallet || busy}
+      title={
+        wallet
+          ? `free testnet collateral · you hold ${balance.data !== undefined ? Number(formatUnits(balance.data, 6)).toFixed(0) : "—"} tUSDC · gas (STT) from testnet.somnia.network`
+          : "connect a wallet first"
+      }
+      onClick={() => writeContract({ address: TEST_USDC, abi: erc20Abi, functionName: "faucet", args: [1_000_000_000n] })}>
+      {busy ? "minting…" : "🚰 get tUSDC"}
+    </button>
   );
 }
 
@@ -248,19 +237,11 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
 
   const shares = useReadContract({
     address: state.address,
-    abi: quorumVaultAbi,
+    abi: vaultAbi,
     functionName: "balanceOf",
     args: wallet ? [wallet] : undefined,
     query: { enabled: !!wallet, refetchInterval: 12_000 },
   });
-  const allowance = useReadContract({
-    address: TEST_USDC,
-    abi: erc20Abi,
-    functionName: "allowance",
-    args: wallet ? [wallet, state.address] : undefined,
-    query: { enabled: !!wallet, refetchInterval: 12_000 },
-  });
-
   const { writeContract, data: txHash, isPending, error: writeError, reset } = useWriteContract();
   const receipt = useWaitForTransactionReceipt({ hash: txHash });
 
@@ -268,17 +249,13 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
     if (receipt.isSuccess) {
       setNote("confirmed ✓");
       void shares.refetch();
-      void allowance.refetch();
     }
   }, [receipt.isSuccess]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const price = state.phase === "OPEN" ? state.openPrice : state.lastSettlePrice ?? 1;
   const myShares = shares.data !== undefined ? Number(formatUnits(shares.data, 6)) : null;
-  const raw = parseUnits(String(amount || 0), 6);
-  // Until the allowance is actually known, the only honest button is a
-  // disabled one: guessing "Deposit" hands a fast user a silent revert.
-  const allowanceKnown = allowance.data !== undefined;
-  const needsApproval = allowanceKnown && allowance.data! < raw;
+  const busy = isPending || receipt.isLoading;
+  const queued = state.phase === "DEPLOYED";
 
   const act = (fn: () => void, label: string) => {
     setNote(label);
@@ -286,14 +263,9 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
     fn();
   };
 
-  const depositLabel = state.phase === "OPEN" ? `Deposit ${amount}` : `Queue ${amount} for next settle`;
-  const busy = isPending || receipt.isLoading;
-
   return (
     <section className="panel">
-      <h2>
-        {state.symbol} — everything {isUp ? "up" : "down"}
-      </h2>
+      <h2>{state.symbol} — everything {isUp ? "up" : "down"}</h2>
       <p className="lede">
         Not one bet — a <strong>bucket</strong>. One {state.symbol} is the same-size position in{" "}
         <em>every</em> market below at once, re-bought every window.
@@ -301,29 +273,23 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
 
       <Bucket state={state} now={now} />
 
-      <div className="stats">
+      <div className="stats" style={{ marginTop: 14 }}>
         <div className="stat hero">
           <div className="k">share price</div>
           <div className="v">{num(price)}</div>
-          <div className="n">
-            {state.phase === "OPEN" ? "live, from the flat balance" : `last settle · epoch ${state.epoch}`}
-          </div>
+          <div className="n">{state.phase === "OPEN" ? "live" : `last settle · epoch ${state.epoch}`}</div>
         </div>
         <div className="stat">
           <div className="k">pot</div>
-          <div className="v">{state.phase === "OPEN" ? state.cash.toFixed(2) : "out working"}</div>
+          <div className="v">{state.phase === "OPEN" ? state.cash.toFixed(2) : "in the markets"}</div>
           <div className="n">{state.totalSupply.toFixed(2)} {state.symbol} outstanding</div>
         </div>
         <div className="stat">
-          <div className="k">phase</div>
+          <div className="k">queue</div>
           <div className="v" style={{ fontSize: 15, paddingTop: 5 }}>
-            {state.phase === "OPEN" ? "open — instant" : `epoch ${state.epoch} deployed`}
+            {state.pendingDeposits + state.pendingWithdraws || "empty"}
           </div>
-          <div className="n">
-            {state.pendingDeposits + state.pendingWithdraws > 0
-              ? `${state.pendingDeposits} deposit(s), ${state.pendingWithdraws} withdrawal(s) queued`
-              : "queue empty"}
-          </div>
+          <div className="n">{queued ? "actions settle in minutes" : "actions are instant now"}</div>
         </div>
       </div>
 
@@ -335,87 +301,45 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
               onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))} />
           </label>
           <button className="primary" disabled={busy || amount <= 0}
-            title="the vault mints free testnet collateral to itself and credits your shares"
+            title="one transaction, no approval — see the FAQ for how"
             onClick={() =>
               act(
                 () =>
                   writeContract({
-                    address: state.address, abi: quorumVaultAbi,
-                    functionName: "depositFree", args: [raw],
+                    address: state.address, abi: vaultAbi,
+                    functionName: "depositFree", args: [parseUnits(String(amount || 0), 6)],
                   }),
                 "depositing…",
               )
             }>
-            {state.phase === "OPEN" ? `Deposit ${amount} — one tx, no approval` : `Deposit ${amount} — queues for next settle`}
+            Deposit {amount}
           </button>
-          {!allowanceKnown ? (
-            <button disabled>checking allowance…</button>
-          ) : needsApproval ? (
-            <button disabled={busy}
-              title="only needed to deposit tUSDC you already hold; the primary button needs no approval at all"
-              onClick={() =>
-                act(
-                  () =>
-                    writeContract({
-                      address: TEST_USDC, abi: erc20Abi, functionName: "approve",
-                      args: [state.address, maxUint256],
-                    }),
-                  "approving (one-time)…",
-                )
-              }>
-              use my own tUSDC (approve once)
-            </button>
-          ) : (
-            <button disabled={busy || amount <= 0}
-              onClick={() =>
-                act(
-                  () =>
-                    writeContract({
-                      address: state.address, abi: quorumVaultAbi,
-                      functionName: "deposit", args: [raw],
-                    }),
-                  "depositing your tUSDC…",
-                )
-              }>
-              use my own tUSDC
-            </button>
-          )}
           <button disabled={busy || !myShares}
-            title={state.phase === "OPEN" ? "instant, at the flat price" : "queues; pays at the next settle"}
             onClick={() =>
               act(
                 () =>
                   writeContract({
-                    address: state.address, abi: quorumVaultAbi,
+                    address: state.address, abi: vaultAbi,
                     functionName: "exit", args: [shares.data!],
                   }),
                 "withdrawing…",
               )
             }>
-            {state.phase === "OPEN" ? "Withdraw all" : "Withdraw all at next settle"}
+            Withdraw all
           </button>
+          {queued && <span className="dim" style={{ fontSize: 12 }}>settles at next window</span>}
         </div>
       ) : (
-        <p className="note" style={{ marginTop: 16 }}>Connect a wallet above to deposit.</p>
+        <p className="note" style={{ marginTop: 16 }}>Connect a wallet (top right) to deposit.</p>
       )}
 
-      {wallet && amount > 0 && state.bucket.some((m) => m.price) && (
-        <p className="note">
-          {amount} tUSDC buys ≈{" "}
-          <b>
-            {(
-              amount / state.bucket.reduce((sum, m) => sum + (m.price ?? 0), 0)
-            ).toFixed(1)}{" "}
-            contracts of each market in the bucket
-          </b>{" "}
-          — the same stance on all of them, not a pick.
-        </p>
-      )}
       {wallet && (
         <p className="note">
           You hold <b>{myShares === null ? "—" : myShares.toFixed(2)} {state.symbol}</b>
-          {myShares !== null && myShares > 0 && <> ≈ {(myShares * price).toFixed(2)} tUSDC at the {state.phase === "OPEN" ? "live" : "last"} price</>}
-          {state.phase === "DEPLOYED" && " · mid-epoch actions queue and execute at the next settle, minutes away"}
+          {myShares !== null && myShares > 0 && <> ≈ {(myShares * price).toFixed(2)} tUSDC</>}
+          {amount > 0 && state.bucket.some((m) => m.price) && (
+            <> · {amount} tUSDC ≈ {(amount / state.bucket.reduce((s, m) => s + (m.price ?? 0), 0)).toFixed(1)} contracts of each market</>
+          )}
         </p>
       )}
       {note && !writeError && !receipt.isError && (
@@ -427,48 +351,41 @@ function VaultCard({ state, wallet, now }: { state: VaultStateApi; wallet?: Addr
   );
 }
 
-/** Testnet self-service: the collateral token has an open faucet. */
-function GetCollateral({ wallet }: { wallet?: Address }) {
-  const { writeContract, data: txHash, isPending } = useWriteContract();
-  const receipt = useWaitForTransactionReceipt({ hash: txHash });
-  const balance = useReadContract({
-    address: TEST_USDC,
-    abi: erc20Abi,
-    functionName: "balanceOf",
-    args: wallet ? [wallet] : undefined,
-    query: { enabled: !!wallet, refetchInterval: 12_000 },
-  });
-
+/** The bucket: every market this pot is spread across, live. */
+function Bucket({ state, now }: { state: VaultStateApi; now: number }) {
+  const isUp = state.side === "UP";
+  if (state.bucket.length === 0) {
+    return <p className="dim">Between windows — the next markets list here the moment they open.</p>;
+  }
   return (
-    <section className="panel">
-      <h2>Need testnet money?</h2>
-      <div className="controls">
-        <button disabled={!wallet || isPending || receipt.isLoading}
-          onClick={() =>
-            writeContract({
-              address: TEST_USDC, abi: erc20Abi, functionName: "faucet",
-              args: [1000n * ONE],
-            })
-          }>
-          {isPending || receipt.isLoading ? "minting…" : "Mint 1,000 tUSDC (free faucet)"}
-        </button>
-        <span className="muted">
-          {wallet && balance.data !== undefined
-            ? `you hold ${Number(formatUnits(balance.data, 6)).toFixed(2)} tUSDC`
-            : "connect a wallet first"}
-          {" "}· gas (STT) comes from the{" "}
-          <a href="https://testnet.somnia.network/" target="_blank" rel="noreferrer">Somnia faucet</a>
-        </span>
-      </div>
-    </section>
+    <div className="bucket">
+      {state.bucket.map((market) => {
+        const seconds = market.expiry - now;
+        return (
+          <div className="bucket-tile" key={market.marketId}>
+            <div className="bucket-market">
+              {market.asset} {market.interval}
+              <span className={isUp ? "up" : "down"}> {isUp ? "▲ up" : "▼ down"}</span>
+            </div>
+            <div className="bucket-price">
+              {market.price === null ? "—" : market.price.toFixed(3)}
+              <span className="bucket-unit"> /contract</span>
+            </div>
+            <div className="bucket-meta">
+              {market.held !== null ? `holding ${market.held.toFixed(1)}` : "in the next buy"}
+            </div>
+            <div className="bucket-meta dim">
+              {seconds > 0
+                ? `closes in ${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
+                : "settling…"}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-/**
- * Holdings and the vaults' track record. The chart is the settle-price series
- * from each vault's own EpochSettled events — the only price the contract ever
- * commits to, which is exactly why it is the honest thing to plot.
- */
 function Dashboard({
   up,
   down,
@@ -482,14 +399,14 @@ function Dashboard({
 }) {
   const upShares = useReadContract({
     address: up?.address,
-    abi: quorumVaultAbi,
+    abi: vaultAbi,
     functionName: "balanceOf",
     args: wallet ? [wallet] : undefined,
     query: { enabled: !!wallet && !!up, refetchInterval: 15_000 },
   });
   const downShares = useReadContract({
     address: down?.address,
-    abi: quorumVaultAbi,
+    abi: vaultAbi,
     functionName: "balanceOf",
     args: wallet ? [wallet] : undefined,
     query: { enabled: !!wallet && !!down, refetchInterval: 15_000 },
@@ -511,51 +428,36 @@ function Dashboard({
     <section className="panel">
       <h2>Your dashboard</h2>
       {wallet ? (
-        <>
-          <div className="stats">
-            <div className="stat hero">
-              <div className="k">total value</div>
-              <div className="v">{totalValue.toFixed(2)}</div>
-              <div className="n">tUSDC, at each vault&rsquo;s latest price</div>
-            </div>
-            {holdings.map(({ state, count, price, value }) => (
-              <div className="stat" key={state.symbol}>
-                <div className="k">{state.symbol}</div>
-                <div className="v">{count === null ? "—" : count.toFixed(2)}</div>
-                <div className="n">
-                  {value === null ? "connect to read" : `≈ ${value.toFixed(2)} tUSDC at ${price.toFixed(4)}`}
-                </div>
-              </div>
-            ))}
+        <div className="stats">
+          <div className="stat hero">
+            <div className="k">total value</div>
+            <div className="v">{totalValue.toFixed(2)}</div>
+            <div className="n">tUSDC, at the latest prices</div>
           </div>
-          <p className="note">
-            Queued deposits appear here after the next settle mints them. Value uses the live flat price
-            while a vault is open, and its last settle price while the money is out working.
-          </p>
-        </>
+          {holdings.map(({ state, count, price, value }) => (
+            <div className="stat" key={state.symbol}>
+              <div className="k">{state.symbol}</div>
+              <div className="v">{count === null ? "—" : count.toFixed(2)}</div>
+              <div className="n">{value === null ? "—" : `≈ ${value.toFixed(2)} tUSDC at ${price.toFixed(4)}`}</div>
+            </div>
+          ))}
+        </div>
       ) : (
-        <p className="lede">Connect a wallet above and your holdings appear here.</p>
+        <p className="lede">Connect a wallet and your holdings appear here.</p>
       )}
 
       <h2 style={{ marginTop: 22 }}>Share price, every settle since launch</h2>
       <PriceChart history={history} />
       <p className="note">
-        Each point is an <code>EpochSettled</code> event — the moment the vault was flat and its price
-        was the on-chain balance divided by supply. Nothing between settles is plotted because nothing
-        between settles is a price the contract stands behind. A vault that starts at 1.00 and jumps
-        is winning windows; one that sinks is losing them — QUP and QDWN hold opposite sides, so over
-        the same windows they move opposite ways.
+        One dot per settle: the vault flat, price = balance ÷ supply, on-chain. Log scale.
       </p>
     </section>
   );
 }
 
 function PriceChart({ history }: { history: HistoryApi | null }) {
-  // Both vaults launched at 1.00, so both lines anchor there, just before the
-  // earliest settle. X is wall-clock time — epoch counts differ between the
-  // vaults, so indexing by epoch would misalign events that happened together.
-  // Y is logarithmic: these are multiplicative returns, and on a linear axis a
-  // vault living below 1.00 reads as a flat line no matter what it does.
+  // X is wall-clock time (epoch counts differ between the vaults); Y is log —
+  // multiplicative returns on a linear axis flatten everything below 1.00.
   const raw = [...(history?.up ?? []), ...(history?.down ?? [])];
   const timed = raw.filter((p) => p.at !== null);
   if (timed.length === 0) {
@@ -581,12 +483,9 @@ function PriceChart({ history }: { history: HistoryApi | null }) {
   const path = (points: HistoryPoint[]) =>
     points.map((p, i) => `${i === 0 ? "M" : "L"}${x(p.at!).toFixed(1)},${y(p.price).toFixed(1)}`).join(" ");
   const label = (v: number) => (v >= 10 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(v >= 0.1 ? 2 : 3));
-
-  // Gridlines at powers of ~2 around 1.00, only the ones inside the window.
   const grid = [8, 4, 2, 1, 0.5, 0.25, 0.1, 0.05, 0.02].filter(
     (v) => Math.log(v) > loLog && Math.log(v) < hiLog,
   );
-  const settles = raw.length;
 
   return (
     <>
@@ -611,7 +510,7 @@ function PriceChart({ history }: { history: HistoryApi | null }) {
           <circle key={`d${p.epoch}`} cx={x(p.at!)} cy={y(p.price)} r="3" fill="var(--down)" />
         ))}
         <text x={width - pad.right} y={height - 8} textAnchor="end" fontSize="10" fill="var(--dim)" fontFamily="var(--mono)">
-          {settles} settle{settles === 1 ? "" : "s"} since launch at 1.00 · log scale
+          {raw.length} settle{raw.length === 1 ? "" : "s"} since launch at 1.00
         </text>
       </svg>
       <div className="legend">
@@ -622,7 +521,7 @@ function PriceChart({ history }: { history: HistoryApi | null }) {
   );
 }
 
-/** The first-visit explainer. Everything a newcomer needs, in one card. */
+/** The first-visit explainer, kept to what a newcomer needs before clicking. */
 function IntroModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -633,24 +532,16 @@ function IntroModal({ onClose }: { onClose: () => void }) {
         </h2>
         <p>
           dreamDEX runs fast prediction markets: every 15 minutes, <em>does BTC close up? does ETH?</em>{" "}
-          Each one alone is a coin flip. <strong>Quorum bundles all of them into two tokens:</strong>
+          Quorum bundles all of them into two tokens:
         </p>
         <p>
-          <b className="up">QUP</b> — a share of a pot that bets <b>up</b> on every market, window after
-          window.<br />
+          <b className="up">QUP</b> — a share of a pot betting <b>up</b> on every market, window after window.<br />
           <b className="down">QDWN</b> — the same pot betting <b>down</b> on everything.
         </p>
         <p>
-          Deposit testnet tUSDC, receive the token, withdraw whenever you like. The pot buys the same
-          number of contracts of each market, and every payout rolls itself into the next window. Your
-          share is priced only when the pot is flat — plain collateral at the contract — so the price is
-          an on-chain balance anyone can verify, never someone&rsquo;s estimate.
-        </p>
-        <p className="muted" style={{ fontSize: 13 }}>
-          Testnet, so it is free to try: gas (STT) from the{" "}
-          <a href="https://testnet.somnia.network/" target="_blank" rel="noreferrer">Somnia faucet</a>,
-          collateral from the mint button on the page. One approval the first time; after that every
-          deposit is a single transaction.
+          Deposit, receive the token, withdraw whenever you like. Deposits are one transaction with no
+          approval, and it&rsquo;s all free testnet money — gas from the faucet in the navbar. Questions?
+          The FAQ is up there too.
         </p>
         <button className="primary" onClick={onClose} style={{ marginTop: 6 }}>
           Got it — show me the vaults
@@ -660,60 +551,8 @@ function IntroModal({ onClose }: { onClose: () => void }) {
   );
 }
 
-/**
- * The bucket, front and center: every market this pot is spread across, this
- * vault's side of its price, the countdown, and — while deployed — the
- * contracts actually held. This is the part a holder is buying, so it gets a
- * board, not a footnote.
- */
-function Bucket({ state, now }: { state: VaultStateApi; now: number }) {
-  const isUp = state.side === "UP";
-  if (state.bucket.length === 0) {
-    return <p className="dim">Between windows — the next 15m markets list here the moment they open.</p>;
-  }
-  const holding = state.bucket.some((m) => m.held !== null);
-  return (
-    <>
-      <div className="bucket">
-        {state.bucket.map((market) => {
-          const seconds = market.expiry - now;
-          return (
-            <div className="bucket-tile" key={market.marketId}>
-              <div className="bucket-market">
-                {market.asset} {market.interval}
-                <span className={isUp ? "up" : "down"}> {isUp ? "▲ up" : "▼ down"}</span>
-              </div>
-              <div className="bucket-price">
-                {market.price === null ? "—" : market.price.toFixed(3)}
-                <span className="bucket-unit"> /contract</span>
-              </div>
-              <div className="bucket-meta">
-                {market.held !== null
-                  ? `holding ${market.held.toFixed(1)} contracts`
-                  : state.phase === "OPEN"
-                    ? "in the next buy"
-                    : "next window joins here"}
-              </div>
-              <div className="bucket-meta dim">
-                {seconds > 0
-                  ? `closes in ${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`
-                  : "settling…"}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <p className="note" style={{ marginTop: 8 }}>
-        {holding
-          ? `The pot holds the same number of contracts in each — win ${state.bucket.length > 1 ? "some" : "it"} and the payout re-enters every next window automatically.`
-          : `Each market gets the same number of contracts, so the payoff is “how many of them closed ${isUp ? "up" : "down"}”, never a single pick.`}
-      </p>
-    </>
-  );
-}
-
 /** The questions people actually ask, answered the way the contracts work. */
-function Faq() {
+function FaqModal({ brain, onClose }: { brain: BrainApi | null; onClose: () => void }) {
   const items: { q: string; a: React.ReactNode }[] = [
     {
       q: "What am I actually buying?",
@@ -725,33 +564,58 @@ function Faq() {
       ),
     },
     {
+      q: "How is the share price calculated?",
+      a: (
+        <>One rule: <code>price = tUSDC in the vault ÷ tokens in circulation</code>, measured only when the
+        vault is flat — pure collateral, no open positions. Worked example: the vault holds <b>300 tUSDC</b>{" "}
+        against <b>250 shares</b>, so the price is <b>1.20</b>. You deposit 60 tUSDC → you are minted
+        60 ÷ 1.20 = <b>50 shares</b>. The pot is now 360 against 300 shares — still exactly 1.20, so
+        joining never moves the price for anyone. Next epoch the bucket wins and the pot settles at
+        396 tUSDC: the price is 396 ÷ 300 = <b>1.32</b>, and withdrawing your 50 shares pays
+        50 × 1.32 = <b>66 tUSDC</b>. There is no formula beyond that division — no oracle, no posted NAV —
+        which is why deposits and withdrawals only execute at flat moments (see the queue question below).</>
+      ),
+    },
+    {
+      q: "How is the money in the vault divided?",
+      a: (
+        <>Each epoch the vault stakes <b>about a third of the pot</b> and keeps two thirds in reserve as
+        plain collateral. The staked third is split to buy <b>the same number of contracts of every live
+        market</b>, so each market&rsquo;s budget is proportional to its price. Example: pot 300 tUSDC →
+        stake 100; three markets ask 0.60, 0.30 and 0.10 per contract (sum 1.00) → the vault buys{" "}
+        <b>100 contracts of each</b>, spending 60, 30 and 10. Every winning contract redeems for exactly
+        1.00, every losing one for 0. Orders carry a small protective cushion (~3%) and are
+        immediate-or-cancel, so anything that doesn&rsquo;t fill at a fair price returns to the reserve
+        untouched.</>
+      ),
+    },
+    {
       q: "How are the bucket quotes calculated?",
       a: (
         <>Each tile shows the venue&rsquo;s <b>best resting ask for this vault&rsquo;s side</b>, read
         straight from the pool contract at that moment — for QUP the lowest Up ask; for QDWN the Down ask,
-        which on a binary book is 1 − the best Up bid. It is the price the vault&rsquo;s next contract
-        would actually cost, not an oracle, an average, or anyone&rsquo;s estimate. When the vault enters,
-        it pays at most that price plus a small protective cushion (~3%), and an IOC order refunds
-        whatever doesn&rsquo;t fill.</>
+        which on a binary book is 1 − the best Up bid. It is what the vault&rsquo;s next contract would
+        actually cost — not an oracle, an average, or anyone&rsquo;s estimate. When the vault enters, it
+        pays at most that price plus a small protective cushion (~3%), and an IOC order refunds whatever
+        doesn&rsquo;t fill.</>
       ),
     },
     {
       q: "What does “queues for next settle” mean?",
       a: (
-        <>Your shares are only ever priced when the vault is <b>flat</b> — everything sitting as plain
-        collateral at the contract — because then the price is <code>balance ÷ supply</code>, an on-chain
-        fact nobody can bend. While the money is out in the markets there is no honest price, so a deposit
-        or withdrawal made mid-epoch waits in a queue and executes at the next settle&rsquo;s single
-        snapshot price, the same one for everybody in line. On 15-minute windows that wait is minutes.
-        This one rule is what makes the shared pot safe: the classic vault attack (push a thin book&rsquo;s
-        mark, mint cheap shares, let it resolve) needs a mark to push — here there is never one.</>
+        <>Deposits and withdrawals made while the money is out in the markets wait in a queue, and execute
+        the moment the current window resolves and the pot is back to plain collateral. At that instant the
+        price is <code>balance ÷ supply</code> — an on-chain fact nobody can bend — and one snapshot pays
+        everyone in line. On 15-minute windows the wait is minutes. This single rule is what makes the
+        shared pot safe: the classic vault attack (push a thin book&rsquo;s mark, mint cheap shares, let it
+        resolve) needs a mark to push, and here there never is one.</>
       ),
     },
     {
       q: "Where does the share price on the chart come from?",
       a: (
         <>Every dot is an <code>EpochSettled</code> event: the moment the vault came back to flat and its
-        price was the actual collateral balance divided by supply. Nothing between settles is plotted
+        price was the actual collateral balance divided by supply. Nothing between settles is plotted,
         because nothing between settles is a price the contract stands behind.</>
       ),
     },
@@ -760,50 +624,66 @@ function Faq() {
       a: (
         <>Each epoch the vault stakes about a third of the pot across the bucket. BTC and ETH close the
         same way in most windows, so &ldquo;the whole bucket lost&rdquo; happens regularly and costs about
-        a third; &ldquo;the whole bucket won&rdquo; pays the odds on that third. A third — not everything
-        — because staking the full pot each window is a fast road to zero, which the first hour of this
-        demo proved empirically. QUP and QDWN hold opposite sides of the same windows, so their charts
-        move opposite ways.</>
+        a third; &ldquo;the whole bucket won&rdquo; pays the odds on that third. A third — not everything —
+        because staking the full pot each window is a fast road to zero. QUP and QDWN hold opposite sides
+        of the same windows, so their charts move opposite ways.</>
       ),
     },
     {
-      q: "What’s the difference between the two deposit buttons?",
+      q: "How can deposits need no approval?",
       a: (
-        <>The main button is <b>one transaction with no approval</b>: the test collateral&rsquo;s faucet is
-        open to anyone — contracts included — so the vault mints the tUSDC to itself inside your deposit
-        call. That is only honest because the same faucet is free to every wallet anyway; nobody is
-        diluted by anything they couldn&rsquo;t have done themselves. The secondary button deposits tUSDC
-        you already hold, which needs the usual one-time ERC-20 approval first.</>
+        <>The test collateral&rsquo;s faucet is open to anyone — contracts included — so the vault mints
+        the tUSDC to itself inside your deposit call: one transaction, nothing to approve. That is only
+        honest because the same faucet is free to every wallet anyway; nobody is diluted by anything they
+        couldn&rsquo;t have done themselves. (Depositing tUSDC you already hold also works — the
+        contract&rsquo;s <code>deposit()</code> takes it after a standard ERC-20 approval.)</>
       ),
     },
     {
       q: "How do I get my money out?",
       a: (
         <>Press withdraw. If the vault is flat you are paid instantly at the exact balance price; if the
-        money is out working, your shares queue and pay at the next settle, minutes later. There is no
-        lock-up, no notice period, and no fee — the only cost anywhere in the system is the markets&rsquo;
-        own bid-ask spread.</>
+        money is out working, your shares queue and pay at the next settle, minutes later. No lock-up, no
+        fee — the only cost anywhere is the markets&rsquo; own bid-ask spread.</>
       ),
     },
     {
-      q: "Who can touch the pot?",
+      q: "Who runs this?",
       a: (
-        <>Only the vault contract itself. Deposits go to the contract, orders are placed by the contract,
-        winnings are redeemed to the contract, and withdrawals are paid by the contract. The brain that
-        wakes it can say <em>when</em>, never <em>where the money goes</em>. The honest caveats are the
-        ones that remain: this is unaudited testnet Solidity, and a bucket lowers variance, not the odds.</>
+        <>Nobody. Each vault holds its own money, reads the books on-chain, places its own orders, redeems
+        its own winnings, and settles its own epochs. A small on-chain brain — holding a Somnia Reactivity
+        bond — receives the venue&rsquo;s market-creation events and fires a self-re-arming heartbeat every
+        window; it can say <em>when</em>, never where the money goes. Every part is permissionless, so a
+        dropped callback can be healed by anyone.
+        {brain && (
+          <>
+            {" "}Receipt:{" "}
+            <a href={`https://shannon-explorer.somnia.network/address/${brain.address}`} target="_blank" rel="noreferrer">
+              the brain
+            </a>{" "}
+            has fired {brain.fireCount} heartbeats, fed {brain.windowsFed} windows, and holds{" "}
+            {brain.bondStt.toFixed(1)} STT of bond.
+          </>
+        )}
+        {" "}The honest limits: unaudited testnet Solidity, and a bucket lowers variance — never the
+        direction of the bet.</>
       ),
     },
   ];
   return (
-    <section className="panel">
-      <h2>FAQ</h2>
-      {items.map((item) => (
-        <details key={item.q} className="faq">
-          <summary>{item.q}</summary>
-          <p>{item.a}</p>
-        </details>
-      ))}
-    </section>
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+        <h2 style={{ margin: "0 0 12px", fontSize: 20, color: "var(--text)" }}>FAQ</h2>
+        <div className="modal-scroll">
+          {items.map((item) => (
+            <details key={item.q} className="faq">
+              <summary>{item.q}</summary>
+              <p>{item.a}</p>
+            </details>
+          ))}
+        </div>
+        <button onClick={onClose} style={{ marginTop: 14 }}>Close</button>
+      </div>
+    </div>
   );
 }
